@@ -7,6 +7,7 @@
     #include <bit>
     #include <cmath>
     #include <complex>
+    #include <concepts>
     #include <functional>
     #include <kmx/tensor.hpp>
     #include <mutex>
@@ -20,8 +21,21 @@
 /// @brief KMX library namespace.
 namespace kmx::fft // Nested namespace syntax
 {
+    /// @brief Concept for a complex number type required by the FFT engine.
+    template <typename T>
+    concept ComplexNumber = requires(T a, T b, typename T::value_type v) {
+        typename T::value_type;
+        { a + b } -> std::same_as<T>;
+        { a - b } -> std::same_as<T>;
+        { a * b } -> std::same_as<T>;
+        { a / b } -> std::same_as<T>;
+        { a *= b } -> std::same_as<T&>;
+        { a /= b } -> std::same_as<T&>;
+        { std::conj(a) } -> std::convertible_to<T>;
+    } && std::floating_point<typename T::value_type>;
+
     // Forward declare engine for use in cache classes if needed
-    template <typename _ComplexNumber>
+    template <ComplexNumber _ComplexNumber>
     class engine;
 
     /// @internal
@@ -35,41 +49,35 @@ namespace kmx::fft // Nested namespace syntax
         /// @brief Checks if a number is a power of 2. `n=0` is not a power of 2.
         [[nodiscard]] constexpr bool is_power_of_2(const std::size_t n) noexcept
         {
-            // return std::has_single_bit(n); // Alternative using C++20 <bit> header
-            return (n > 0u) && ((n & (n - 1u)) == 0u);
+            return std::has_single_bit(n);
         }
 
         /// @brief Reorders elements in a view based on bit-reversed indices (in-place).
         /// Required for Cooley-Tukey algorithm. Assumes view is 1D.
         /// @tparam _ComplexNumber The complex number type.
         /// @param signal_view The non-const 1D view to reorder.
-        template <typename _ComplexNumber>
+        template <ComplexNumber _ComplexNumber>
         void bit_reverse_reorder(tensor::view<_ComplexNumber> signal_view) noexcept
         {
             static_assert(!tensor::view<_ComplexNumber>::is_const_type, "bit_reverse_reorder requires a non-const view");
             // Assume signal_view is rank 1, checked by callers if necessary.
             const std::size_t n = signal_view.size();
             if (n <= 1u)
-                return; // No reordering needed for size 0 or 1
+                return;
 
-            // std::bit_width(n-1) gives the number of bits needed to represent indices up to n-1.
             const unsigned int num_bits = std::bit_width(n - 1u);
-
-            // Iterate only up to n/2, swapping ensures full reorder.
-            for (std::size_t i = 1u; i < n; ++i) // Start from 1, 0 stays at 0
+            const auto raw = signal_view.data(); // Direct span access — avoids bounds checks in hot loop
+            for (std::size_t i = 1u; i < n; ++i) // 0 stays at 0
             {
                 std::size_t reversed_i = 0u;
                 std::size_t temp_i = i;
-                // Efficient bit reversal loop
                 for (unsigned int k = 0u; k < num_bits; ++k)
                 {
                     reversed_i = (reversed_i << 1u) | (temp_i & 1u);
                     temp_i >>= 1u;
                 }
-
-                // Swap only if the reversed index is greater to avoid double swaps
                 if (reversed_i > i)
-                    std::swap(signal_view[i], signal_view[reversed_i]);
+                    std::swap(raw[i], raw[reversed_i]);
             }
         }
 
@@ -77,7 +85,7 @@ namespace kmx::fft // Nested namespace syntax
         /// @internal
         /// @brief Manages caching of precomputed twiddle factors for Cooley-Tukey FFT. Thread-safe using shared_mutex.
         /// @tparam _ComplexNumber The complex number type used in FFT.
-        template <typename _ComplexNumber>
+        template <ComplexNumber _ComplexNumber>
         class twiddle_factor_cache
         {
             // Type alias for the template argument.
@@ -109,16 +117,14 @@ namespace kmx::fft // Nested namespace syntax
                 constexpr std::size_t inverse_flag_bit = (1ull << (sizeof(std::size_t) * 8u - 1u));
                 const std::size_t cache_key = inverse ? (n | inverse_flag_bit) : n;
 
-                // --- Double-Checked Locking Pattern ---
+                // Double-Checked Locking Pattern
 
                 // 1. First check (read lock): Try to find the key under a shared lock.
                 {
                     std::shared_lock lock(mutex_); // Acquire shared lock (multiple readers allowed)
-                    auto it = cache_.find(cache_key);
+                    const auto it = cache_.find(cache_key);
                     if (it != cache_.end())
-                    {
                         return it->second.factors; // Found: return cached data
-                    }
                 } // Shared lock released here
 
                 // 2. Prepare for potential write: Compute factors *outside* any lock.
@@ -143,7 +149,7 @@ namespace kmx::fft // Nested namespace syntax
                     std::unique_lock lock(mutex_); // Acquire exclusive lock (only one writer allowed)
                     // Need to check *again* in case another thread computed and inserted
                     // the factors between the shared lock release and acquiring the unique lock.
-                    auto [it, inserted] = cache_.try_emplace(cache_key, cache_entry {std::move(computed_factors)});
+                    const auto [it, inserted] = cache_.try_emplace(cache_key, cache_entry {std::move(computed_factors)});
                     // 'it' points to the element (either newly inserted or the one found by try_emplace)
                     // 'inserted' tells us if the emplace actually happened (useful for debugging, not strictly needed here)
 
@@ -157,7 +163,7 @@ namespace kmx::fft // Nested namespace syntax
         /// @internal
         /// @brief Manages caching of precomputed chirp and filter factors for Bluestein's FFT algorithm. Thread-safe using shared_mutex.
         /// @tparam _ComplexNumber The complex number type used in FFT.
-        template <typename _ComplexNumber>
+        template <ComplexNumber _ComplexNumber>
         class bluestein_factor_cache
         {
         public:
@@ -199,12 +205,12 @@ namespace kmx::fft // Nested namespace syntax
                 // Calculate required padded size M (must be power of 2 >= 2N-1)
                 const std::size_t m = (n == 0u) ? 0u : std::bit_ceil(2u * n - 1u); // Handles n=0
 
-                // --- Double-Checked Locking Pattern ---
+                // Double-Checked Locking Pattern
 
                 // 1. First check (read lock): Try to find the key under a shared lock.
                 {
                     std::shared_lock lock(mutex_); // Acquire shared lock
-                    auto it = cache_.find(cache_key);
+                    const auto it = cache_.find(cache_key);
                     if (it != cache_.end())
                     {
                         // Sanity check: Ensure cached padded size matches current requirement
@@ -231,8 +237,8 @@ namespace kmx::fft // Nested namespace syntax
                     for (std::size_t k = 0u; k < n; ++k)
                     {
                         // Use unsigned long long for k*k to avoid potential overflow for large k before casting to float
-                        unsigned long long k_squared = static_cast<unsigned long long>(k) * k;
-                        float_type theta =
+                        const auto k_squared = static_cast<unsigned long long>(k) * k;
+                        const float_type theta =
                             sign * pi_over_n *
                             static_cast<float_type>(k_squared %
                                                     (2 * n)); // Use modulo 2N property if needed, although direct calc is likely fine
@@ -257,46 +263,15 @@ namespace kmx::fft // Nested namespace syntax
                     recursive_transform(filter_view, false);           // Always use forward FFT for filter
                     computed_entry.filter_fft = std::move(filter_vec); // Store the FFT'd filter
                 }
-                else // Handle N=0 case: empty factors
-                {
-                    computed_entry.chirp.clear();
-                    computed_entry.filter_fft.clear(); // M is 0, so filter FFT is empty
-                }
+                // (n == 0: chirp and filter_fft remain empty — default-constructed vectors)
 
                 // 3. Second check and potential insert (write lock): Acquire an exclusive lock.
                 {
                     std::unique_lock lock(mutex_); // Acquire exclusive lock
-                    // Need to check *again* in case another thread computed and inserted
-                    // the factors between the shared lock release and acquiring the unique lock.
-                    // Also re-verify consistency if found.
-                    auto it = cache_.find(cache_key);
-                    if (it != cache_.end())
-                    {
-                        // Entry exists, check consistency again before returning
-                        if (it->second.padded_m != m) [[unlikely]]
-                        {
-                            // This indicates a logic error or hash collision with different M requirements, which shouldn't happen with the
-                            // current key scheme. Depending on desired behavior, could overwrite or throw. Throwing is safer.
-                            throw std::logic_error("Bluestein cache inconsistency detected during write lock: padded size mismatch.");
-                        }
-                        // It exists and is consistent, return it. The computed_entry will be discarded.
-                        return it->second;
-                    }
-                    else
-                    {
-                        // Entry doesn't exist, insert the computed one
-                        auto [insert_it, inserted] = cache_.emplace(cache_key, std::move(computed_entry));
-                        // Return the newly inserted entry
-                        return insert_it->second;
-                    }
-                    // Alternative using try_emplace if consistency check is primary concern:
-                    // auto [it, inserted] = cache_.try_emplace(cache_key, std::move(computed_entry));
-                    // // Check consistency *after* emplace attempt
-                    // if (it->second.padded_m != m) [[unlikely]] {
-                    //     // Handle inconsistency - maybe remove the bad entry? Or throw.
-                    //     throw std::logic_error("Bluestein cache inconsistency after computation: padded size mismatch.");
-                    // }
-                    // return it->second;
+                    const auto [it, inserted] = cache_.try_emplace(cache_key, std::move(computed_entry));
+                    if (!inserted && it->second.padded_m != m) [[unlikely]]
+                        throw std::logic_error("Bluestein cache inconsistency detected during write lock: padded size mismatch.");
+                    return it->second;
                 } // Unique lock released here
             }
         };
@@ -309,7 +284,7 @@ namespace kmx::fft // Nested namespace syntax
     /// leveraging internally thread-safe caches.
     /// @tparam _ComplexNumber The complex number type (e.g., `std::complex<float>`, `std::complex<double>`).
     ///         Must have a `value_type` member defining the underlying float type.
-    template <typename _ComplexNumber>
+    template <ComplexNumber _ComplexNumber>
     class engine
     {
     public:
@@ -337,34 +312,26 @@ namespace kmx::fft // Nested namespace syntax
 
             // Get twiddle factors (thread-safe access to cache)
             const std::vector<complex_number_type>& twiddle_factors_n = twiddle_cache_.get(n, inverse);
+            const auto raw = signal_view.data(); // Direct span access — avoids bounds checks in hot loop
 
             // Iterative Cooley-Tukey butterfly stages
-            for (std::size_t segment_len = 2u; segment_len <= n; segment_len <<= 1u) // segment_len = 2, 4, 8, ..., N
+            for (std::size_t segment_len = 2u; segment_len <= n; segment_len <<= 1u)
             {
-                const std::size_t half_segment_len = segment_len >> 1u; // segment_len / 2
-                const std::size_t twiddle_step = n / segment_len;       // Step size in the twiddle factor table
+                const std::size_t half_segment_len = segment_len >> 1u;
+                const std::size_t twiddle_step = n / segment_len;
 
-                // Process segments within the signal
                 for (std::size_t offset = 0u; offset < n; offset += segment_len)
-                {
-                    // Process butterflies within the segment
                     for (std::size_t k = 0u; k < half_segment_len; ++k)
                     {
-                        // Twiddle factor W_segmentLen^k (or conj for inverse)
-                        // Index into precomputed table: k * (N / segmentLen)
                         const complex_number_type& twiddle = twiddle_factors_n[k * twiddle_step];
-
                         const std::size_t even_idx = offset + k;
                         const std::size_t odd_idx = even_idx + half_segment_len;
 
-                        // Perform butterfly: Use temporary to avoid overwriting signal_view[even_idx] prematurely
-                        const _ComplexNumber odd_val_times_twiddle = signal_view[odd_idx] * twiddle;
-                        const _ComplexNumber even_val_temp = signal_view[even_idx];
-
-                        signal_view[even_idx] = even_val_temp + odd_val_times_twiddle;
-                        signal_view[odd_idx] = even_val_temp - odd_val_times_twiddle;
+                        const _ComplexNumber odd_val_times_twiddle = raw[odd_idx] * twiddle;
+                        const _ComplexNumber even_val_temp = raw[even_idx];
+                        raw[even_idx] = even_val_temp + odd_val_times_twiddle;
+                        raw[odd_idx] = even_val_temp - odd_val_times_twiddle;
                     }
-                }
             }
         }
 
@@ -380,7 +347,7 @@ namespace kmx::fft // Nested namespace syntax
             // Lambda function for the recursive FFT calls needed by the cache
             // Captures 'this' to call back into the engine's core transform method.
             // Ensure this lambda has the correct signature expected by bluestein_factor_cache.
-            typename internal::bluestein_factor_cache<_ComplexNumber>::transform_func recursive_transform =
+            const typename internal::bluestein_factor_cache<_ComplexNumber>::transform_func recursive_transform =
                 [this](tensor::view<_ComplexNumber> v, bool inv) { this->transform_1d_core(v, inv); };
 
             // Get Bluestein factors (thread-safe access to cache)
@@ -393,21 +360,18 @@ namespace kmx::fft // Nested namespace syntax
 
             // Check if factors are valid (m should not be 0 if n > 0)
             if (n > 0 && m == 0) [[unlikely]]
-            {
                 throw std::logic_error("Bluestein algorithm error: Padded size M is zero for non-zero N.");
-            }
+
             // Also check if filter_fft size matches m
             if (filter_fft.size() != m) [[unlikely]]
-            {
                 throw std::logic_error("Bluestein algorithm error: Cached filter FFT size mismatch.");
-            }
 
             // Allocate temporary padded vector
             // Note: This allocation happens per-call. Could be optimized with a thread-local buffer pool if this is a bottleneck.
             std::vector<_ComplexNumber> a_padded_vec(m, _ComplexNumber {float_type {0.0}, float_type {0.0}});
 
             // Step 1: Multiply input by chirp: a[k] = signal[k] * chirp[k]
-            auto signal_data = signal_view.data(); // Get span/iterator to underlying data
+            const auto signal_data = signal_view.data(); // Get span/iterator to underlying data
             for (std::size_t k = 0u; k < n; ++k)
                 a_padded_vec[k] = signal_data[k] * chirp[k];
             // The rest of a_padded_vec (from n to m-1) remains zero.
@@ -416,10 +380,8 @@ namespace kmx::fft // Nested namespace syntax
             tensor::view<_ComplexNumber> a_padded_view(a_padded_vec);
             // Crucially, use transform_power_of_2 directly IF m is guaranteed power-of-2 and > 1
             // Or just call transform_1d_core which will dispatch correctly.
-            if (m > 1u)
-            {                                                  // Only transform if size > 1
+            if (m > 1u) // Only transform if size > 1
                 this->transform_1d_core(a_padded_view, false); // Forward FFT of 'a'
-            }
 
             // Step 3: Element-wise multiply FFT(a) with FFT(filter)
             tensor::view<const _ComplexNumber> filter_fft_view(filter_fft);
@@ -427,34 +389,21 @@ namespace kmx::fft // Nested namespace syntax
                 throw std::logic_error("Bluestein size mismatch between padded data and filter FFT");
 
             // Use std::ranges::transform or a simple loop
-            auto a_padded_data = a_padded_view.data();     // Get span
-            auto filter_fft_data = filter_fft_view.data(); // Get span
+            const auto a_padded_data = a_padded_view.data();     // Get span
+            const auto filter_fft_data = filter_fft_view.data(); // Get span
             for (std::size_t i = 0; i < m; ++i)
-            {
                 a_padded_data[i] *= filter_fft_data[i];
-            }
             // Or: std::ranges::transform(a_padded_data, filter_fft_data, a_padded_data.begin(), std::multiplies<>{});
 
             // Step 4: Compute Inverse FFT of the product (without 1/M scaling yet)
-            if (m > 1u)
-            {                                                 // Only transform if size > 1
+            if (m > 1u) // Only transform if size > 1
                 this->transform_1d_core(a_padded_view, true); // Inverse FFT
-            }
 
-            // Step 5: Scale the result of IFFT by 1/M (apply the IFFT scaling for the convolution here)
-            if (m > 0u)
-            {
-                const float_type inv_m_float = float_type {1.0} / static_cast<float_type>(m);
-                const _ComplexNumber inv_m_complex = _ComplexNumber {inv_m_float, float_type {0.0}};
-                auto result_data = a_padded_view.data();
-                for (auto& val: result_data) // Using span simplifies loop
-                    val *= inv_m_complex;
-            }
-
-            // Step 6: Multiply by chirp again and store final result back in original signal_view
-            auto final_result_data = a_padded_view.data();
+            // Steps 5 & 6 combined: scale by 1/M only the n used elements, multiply by chirp, store to signal
+            // (Avoids scaling the m-n padding elements that are never read)
+            const float_type inv_m_float = float_type {1.0} / static_cast<float_type>(m);
             for (std::size_t k = 0u; k < n; ++k)
-                signal_data[k] = final_result_data[k] * chirp[k];
+                signal_data[k] = a_padded_data[k] * chirp[k] * inv_m_float;
         }
 
         /// @brief Core 1D FFT/IFFT logic dispatcher (in-place). Selects algorithm.
@@ -512,10 +461,8 @@ namespace kmx::fft // Nested namespace syntax
                 if (inverse)
                 {
                     const float_type inv_n_float = float_type {1.0} / static_cast<float_type>(n);
-                    const _ComplexNumber inv_n_complex = _ComplexNumber {inv_n_float, float_type {0.0}};
-                    auto data = tensor_obj.data(); // Get span
-                    for (auto& val: data)
-                        val *= inv_n_complex;
+                    for (auto& val: tensor_obj.data())
+                        val *= inv_n_float; // Real ×= avoids complex multiplication overhead
                 }
             }
         }
@@ -577,10 +524,8 @@ namespace kmx::fft // Nested namespace syntax
                 return;                                  // Done
             }
             else if (current_rank != 2u) [[unlikely]]
-            {
                 throw std::invalid_argument("engine::transform_2d (in-place) input view must have rank 1 or 2. Found rank " +
                                             std::to_string(current_rank));
-            }
 
             // Proceed with Rank 2
             const tensor::dimension_shape current_shape = tensor_obj.shape();
@@ -592,15 +537,13 @@ namespace kmx::fft // Nested namespace syntax
 
             // Step 1: Perform 1D FFT/IFFT on each row
             if (cols > 0u) // Avoid loop if cols is 0
-            {
                 for (std::size_t r = 0u; r < rows; ++r)
                 {
-                    auto row_t_view = tensor_obj.row_view(r);
+                    const auto row_t_view = tensor_obj.row_view(r);
                     // Apply 1D transform (includes 1/cols scaling if inverse and cols > 0)
                     // Note: transform_1d handles scaling internally based on 'inverse' flag and row_t_view.size() (which is 'cols')
                     this->transform_1d(row_t_view, inverse);
                 }
-            }
 
             // Step 2: Perform 1D FFT/IFFT on each column
             if (rows > 0u) // Avoid loop if rows is 0
@@ -611,22 +554,17 @@ namespace kmx::fft // Nested namespace syntax
                 std::vector<_ComplexNumber> temp_col_vec(rows); // Allocate buffer of size 'rows'
                 tensor::view<_ComplexNumber> temp_col_view(temp_col_vec);
 
+                const auto raw_2d = tensor_obj.data(); // Direct span — avoids index object creation per element
                 for (std::size_t c = 0u; c < cols; ++c)
                 {
-                    // Copy column 'c' to the temporary buffer
-                    // This copy is necessary because tensor columns are strided.
+                    // Copy column 'c' to the temporary buffer (columns are non-contiguous)
                     for (std::size_t r = 0u; r < rows; ++r)
-                        // Use multi-dimensional index accessor
-                        temp_col_vec[r] = tensor_obj[internal_index_type {r, c}];
+                        temp_col_vec[r] = raw_2d[r * cols + c];
 
-                    // Perform 1D transform on the temporary column buffer
-                    // Note: transform_1d handles scaling (1/rows) internally if inverse=true and rows > 0.
                     this->transform_1d(temp_col_view, inverse);
 
-                    // Copy the transformed column back from the buffer
                     for (std::size_t r = 0u; r < rows; ++r)
-                        // Use multi-dimensional index accessor
-                        tensor_obj[internal_index_type {r, c}] = temp_col_view[r];
+                        raw_2d[r * cols + c] = temp_col_view[r];
                 }
             }
 

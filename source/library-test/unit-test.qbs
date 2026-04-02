@@ -21,8 +21,7 @@ CppApplication {
         "inc_dep"
     ]
     cpp.systemIncludePaths: [
-        "/usr/local/include",
-        "/usr/include"
+        "/usr/local/include"
     ]
     cpp.staticLibraries: [
         "/usr/local/lib/libCatch2Main.a",

@@ -40,17 +40,13 @@ namespace kmx::fft::test_helpers // Use a nested namespace for test helpers
     {
         // Non-finite numbers are never close to anything, including themselves if NaN
         if (!std::isfinite(a.real()) || !std::isfinite(a.imag()) || !std::isfinite(b.real()) || !std::isfinite(b.imag()))
-        {
             return false;
-        }
 
         // Check absolute difference first (handles comparison near zero)
         const float_type diff_real = std::abs(a.real() - b.real());
         const float_type diff_imag = std::abs(a.imag() - b.imag());
         if (diff_real <= abs_tolerance && diff_imag <= abs_tolerance)
-        {
-            return true;
-        }
+          return true;
 
         // Check relative difference for larger numbers
         // Use max of absolute values as the reference scale
@@ -61,9 +57,7 @@ namespace kmx::fft::test_helpers // Use a nested namespace for test helpers
         // Note: Avoid division by zero if max_norm is very small (handled by abs_tolerance check)
         // If max_norm is exactly zero, only the abs_tolerance check matters.
         if (max_norm == float_type {0.0})
-        {
-            return diff_real <= abs_tolerance && diff_imag <= abs_tolerance;
-        }
+          return diff_real <= abs_tolerance && diff_imag <= abs_tolerance;
 
         return diff_real <= rel_tolerance * max_norm && diff_imag <= rel_tolerance * max_norm;
     }
@@ -82,16 +76,13 @@ namespace kmx::fft::test_helpers // Use a nested namespace for test helpers
                                     typename view<T1, IndexType>::non_const_value_type::value_type rel_tolerance) noexcept
     {
         if (t1.shape() != t2.shape())
-        {
             // std::cerr << "Shape mismatch: t1=" << t1.shape_str() << " vs t2=" << t2.shape_str() << std::endl; // Need a shape string
             // helper
             return false;
-        }
+
         // If shapes match and one is empty, the other must be too.
         if (t1.empty())
-        {
             return true; // Both must be empty
-        }
 
         // Determine float type and absolute tolerance
         using float_type = typename view<T1, IndexType>::non_const_value_type::value_type;
@@ -101,7 +92,6 @@ namespace kmx::fft::test_helpers // Use a nested namespace for test helpers
         // Iterate using flat index for efficiency (already checked shapes match)
         const std::size_t total_size = t1.size();
         for (std::size_t i = 0u; i < total_size; ++i)
-        {
             // Access using flat index operator[] which includes bounds check in our implementation
             if (!complex_close(t1[i], t2[i], rel_tolerance, abs_tol))
             {
@@ -109,7 +99,7 @@ namespace kmx::fft::test_helpers // Use a nested namespace for test helpers
                 //           << " (RelTol=" << rel_tolerance << ", AbsTol=" << abs_tol << ")" << std::endl;
                 return false;
             }
-        }
+
         return true;
     }
 
@@ -165,6 +155,7 @@ namespace kmx::fft::test_helpers // Use a nested namespace for test helpers
                 ss << dim_size;
                 first_dim = false;
             }
+
             ss << "], size " << m_expected.size() << ") within relative tolerance " << m_rel_tolerance;
             return ss.str();
         }
@@ -206,14 +197,157 @@ namespace kmx::fft::test_helpers // Use a nested namespace for test helpers
 
         // Fill the vector efficiently
         for (auto& val: vec)
-        {
             val = complex_type {dist(gen), (real_only ? float_type {0.0} : dist(gen))};
+    }
+
+    /// @brief Tests FFT linearity: FFT(a*x + b*y) == a*FFT(x) + b*FFT(y)
+    TEST_CASE("fft_linearity", "[fft][linearity][engine]")
+    {
+        using complex_d = std::complex<double>;
+        using namespace kmx::tensor;
+        using namespace kmx::fft::test_helpers;
+        const double tolerance = std::numeric_limits<double>::epsilon() * 10000.0;
+
+        kmx::fft::engine<complex_d> engine;
+
+        const std::vector<std::size_t> test_sizes = {8u, 15u, 32u, 100u};
+        for (const std::size_t n: test_sizes)
+        {
+            DYNAMIC_SECTION("size_n_" << n)
+            {
+                std::vector<complex_d> x(n), y(n), ax_plus_by(n);
+                std::vector<complex_d> fft_x(n), fft_y(n), fft_sum(n), expected(n);
+
+                fill_random(x, static_cast<unsigned int>(n));
+                fill_random(y, static_cast<unsigned int>(n + 1000u));
+
+                const complex_d a = {2.5, -1.0};
+                const complex_d b = {-0.5, 3.0};
+
+                for (std::size_t i = 0; i < n; ++i)
+                    ax_plus_by[i] = a * x[i] + b * y[i];
+
+                view<const complex_d> vx(x), vy(y), vsum(ax_plus_by);
+                view<complex_d> vfx(fft_x), vfy(fft_y), vfs(fft_sum), vexp(expected);
+
+                engine.transform_1d(vx, vfx, false);
+                engine.transform_1d(vy, vfy, false);
+                engine.transform_1d(vsum, vfs, false);
+
+                for (std::size_t i = 0; i < n; ++i)
+                    expected[i] = a * fft_x[i] + b * fft_y[i];
+
+                REQUIRE_THAT(vfs, is_tensor_close(view<const complex_d>(expected), tolerance));
+            }
         }
+    }
+
+    /// @brief Tests Parseval's theorem: sum(|x|²) == (1/N) * sum(|X|²)
+    TEST_CASE("fft_parseval", "[fft][parseval][engine]")
+    {
+        using complex_d = std::complex<double>;
+        using namespace kmx::tensor;
+        using namespace kmx::fft::test_helpers;
+
+        kmx::fft::engine<complex_d> engine;
+
+        const std::vector<std::size_t> test_sizes = {8u, 13u, 32u, 64u, 100u};
+        for (const std::size_t n: test_sizes)
+        {
+            DYNAMIC_SECTION("size_n_" << n)
+            {
+                std::vector<complex_d> signal(n), spectrum(n);
+                fill_random(signal, static_cast<unsigned int>(n + 2000u));
+
+                view<const complex_d> vsig(signal);
+                view<complex_d> vspec(spectrum);
+                engine.transform_1d(vsig, vspec, false);
+
+                double energy_time = 0.0;
+                for (const auto& v: signal)
+                    energy_time += std::norm(v);
+
+                double energy_freq = 0.0;
+                for (const auto& v: spectrum)
+                    energy_freq += std::norm(v);
+                energy_freq /= static_cast<double>(n);
+
+                const double tolerance = energy_time * std::numeric_limits<double>::epsilon() * 100000.0;
+                REQUIRE_THAT(energy_freq, Catch::Matchers::WithinAbs(energy_time, tolerance));
+            }
+        }
+    }
+
+    /// @brief Tests that a single complex sinusoid produces a single frequency spike.
+    TEST_CASE("fft_single_sinusoid", "[fft][sinusoid][engine]")
+    {
+        using complex_d = std::complex<double>;
+        using namespace kmx::tensor;
+
+        kmx::fft::engine<complex_d> engine;
+
+        const std::size_t n = 64u;
+        const std::size_t freq_bin = 5u; // target frequency bin
+        const double pi2 = 2.0 * std::numbers::pi_v<double>;
+
+        // Build x[k] = exp(i * 2π * freq_bin * k / N)  —  a pure sinusoid at freq_bin
+        std::vector<complex_d> signal(n);
+        for (std::size_t k = 0; k < n; ++k)
+        {
+            const double theta = pi2 * static_cast<double>(freq_bin) * static_cast<double>(k) / static_cast<double>(n);
+            signal[k] = {std::cos(theta), std::sin(theta)};
+        }
+
+        std::vector<complex_d> spectrum(n);
+        view<const complex_d> vsig(signal);
+        view<complex_d> vspec(spectrum);
+        engine.transform_1d(vsig, vspec, false);
+
+        // Bin freq_bin should have magnitude ≈ N; all others ≈ 0
+        const double peak_magnitude = std::abs(spectrum[freq_bin]);
+        REQUIRE_THAT(peak_magnitude, Catch::Matchers::WithinAbs(static_cast<double>(n), static_cast<double>(n) * 1e-9));
+
+        for (std::size_t k = 0; k < n; ++k)
+        {
+            if (k == freq_bin)
+                continue;
+            REQUIRE_THAT(std::abs(spectrum[k]), Catch::Matchers::WithinAbs(0.0, static_cast<double>(n) * 1e-9));
+        }
+    }
+
+    /// @brief Tests that calling the engine multiple times for the same size produces consistent results (cache).
+    TEST_CASE("fft_cache_consistency", "[fft][cache][engine]")
+    {
+        using complex_d = std::complex<double>;
+        using namespace kmx::tensor;
+        using namespace kmx::fft::test_helpers;
+        const double tolerance = std::numeric_limits<double>::epsilon() * 10000.0;
+
+        kmx::fft::engine<complex_d> engine;
+
+        const std::size_t n = 16u;
+        std::vector<complex_d> signal(n), out1(n), out2(n);
+        fill_random(signal, 99u);
+
+        view<const complex_d> vsig(signal);
+        view<complex_d> vo1(out1), vo2(out2);
+
+        engine.transform_1d(vsig, vo1, false); // First call — populates cache
+        engine.transform_1d(vsig, vo2, false); // Second call — hits cache
+
+        REQUIRE_THAT(vo2, is_tensor_close(view<const complex_d>(out1), tolerance));
+
+        // Also verify inverse cache is consistent
+        std::vector<complex_d> inv1(n), inv2(n);
+        view<complex_d> vi1(inv1), vi2(inv2);
+        engine.transform_1d(vo1, vi1, true);
+        engine.transform_1d(vo2, vi2, true);
+        REQUIRE_THAT(vi2, is_tensor_close(view<const complex_d>(inv1), tolerance));
     }
 
 } // namespace kmx::fft::test_helpers
 
-// --- Test Cases ---
+// Test Cases
 
 /// @brief Tests the forward and inverse 1D FFT for identity property (FFT(IFFT(x)) == x) using engine.
 TEST_CASE("fft_1d_forward_inverse_identity", "[fft][d1][engine]")
@@ -253,13 +387,13 @@ TEST_CASE("fft_1d_forward_inverse_identity", "[fft][d1][engine]")
             view<complex_d> spectrum_view(spectrum_data);
             view<complex_d> reconstructed_view(reconstructed_data);
 
-            // --- Out-of-place Test: FFT -> IFFT ---
+            // Out-of-place Test: FFT -> IFFT
             REQUIRE_NOTHROW(engine.transform_1d(signal_view, spectrum_view, false));       // Forward FFT
             REQUIRE_NOTHROW(engine.transform_1d(spectrum_view, reconstructed_view, true)); // Inverse FFT
             // Verify that the reconstructed signal matches the original within tolerance
             REQUIRE_THAT(reconstructed_view, is_tensor_close(original_view, tolerance));
 
-            // --- In-place Test: FFT -> IFFT ---
+            // In-place Test: FFT -> IFFT
             // Create a non-const view of the original signal data buffer for in-place modification
             view<complex_d> signal_inplace_view(signal_data);
             REQUIRE_NOTHROW(engine.transform_1d(signal_inplace_view, false)); // Forward FFT (in-place)
@@ -327,13 +461,13 @@ namespace kmx::fft
                 view<complex_f> spectrum_view(spectrum_data, shape_view);
                 view<complex_f> reconstructed_view(reconstructed_data, shape_view);
 
-                // --- Out-of-place Test: FFT -> IFFT ---
+                // Out-of-place Test: FFT -> IFFT
                 REQUIRE_NOTHROW(engine.transform_2d(signal_view, spectrum_view, false));       // Forward 2D FFT
                 REQUIRE_NOTHROW(engine.transform_2d(spectrum_view, reconstructed_view, true)); // Inverse 2D FFT
                 // Verify identity
                 REQUIRE_THAT(reconstructed_view, is_tensor_close(original_view, tolerance));
 
-                // --- In-place Test: FFT -> IFFT ---
+                // In-place Test: FFT -> IFFT
                 // Create non-const view for in-place operation
                 view<complex_f> signal_inplace_view(signal_data, shape_view);
                 REQUIRE_NOTHROW(engine.transform_2d(signal_inplace_view, false)); // Forward 2D FFT (in-place)
@@ -529,7 +663,7 @@ namespace kmx::fft
         // Create engine instance
         kmx::fft::engine<complex_d> engine;
 
-        // --- Setup Data and Shapes for Invalid Cases ---
+        // Setup Data and Shapes for Invalid Cases
         std::vector<complex_d> data_1d = {{1.0}, {2.0}, {3.0}, {4.0}};
         std::vector<complex_d> data_2d = {{1.0}, {2.0}, {3.0}, {4.0}, {5.0}, {6.0}};
         std::vector<complex_d> data_3d(8); // 2x2x2
@@ -658,11 +792,11 @@ namespace kmx::fft
             view<const complex_d> expected_fft_view(expected_fft);
             view<complex_d> actual_fft_view(actual_fft_data);
 
-            // --- Test Forward FFT ---
+            // Test Forward FFT
             REQUIRE_NOTHROW(engine.transform_1d(signal_view, actual_fft_view, false));
             REQUIRE_THAT(actual_fft_view, is_tensor_close(expected_fft_view, tolerance));
 
-            // --- Test Inverse FFT ---
+            // Test Inverse FFT
             // IFFT of the expected spectrum should yield the original delta signal
             std::vector<complex_d> reconstructed_data(N);
             view<complex_d> reconstructed_view(reconstructed_data);
@@ -684,11 +818,11 @@ namespace kmx::fft
             view<const complex_d> expected_fft_view(expected_fft);
             view<complex_d> actual_fft_view(actual_fft_data);
 
-            // --- Test Forward FFT ---
+            // Test Forward FFT
             REQUIRE_NOTHROW(engine.transform_1d(signal_view, actual_fft_view, false));
             REQUIRE_THAT(actual_fft_view, is_tensor_close(expected_fft_view, tolerance));
 
-            // --- Test Inverse FFT ---
+            // Test Inverse FFT
             // IFFT of the expected spectrum should yield the original constant signal
             std::vector<complex_d> reconstructed_data(N);
             view<complex_d> reconstructed_view(reconstructed_data);
@@ -715,10 +849,10 @@ namespace kmx::fft
                     view<const complex_d> signal_view(signal_data);
                     view<complex_d> actual_fft_view(actual_fft_data);
 
-                    // --- Compute Forward FFT ---
+                    // Compute Forward FFT
                     REQUIRE_NOTHROW(engine.transform_1d(signal_view, actual_fft_view, false));
 
-                    // --- Verify Conjugate Symmetry Property: X[k] = conj(X[N-k]) ---
+                    // Verify Conjugate Symmetry Property: X[k] = conj(X[N-k])
                     // Check DC component (k=0) is real
                     REQUIRE_THAT(actual_fft_view[0].imag(), Catch::Matchers::WithinAbs(0.0, abs_tolerance));
 
@@ -745,7 +879,7 @@ namespace kmx::fft
                         }
                     }
 
-                    // --- Optional: Verify IFFT reconstructs the real signal ---
+                    // Optional: Verify IFFT reconstructs the real signal
                     std::vector<complex_d> reconstructed_data(current_n);
                     view<complex_d> reconstructed_view(reconstructed_data);
                     view<const complex_d> original_signal_view(signal_data);
@@ -753,9 +887,7 @@ namespace kmx::fft
                     REQUIRE_THAT(reconstructed_view, is_tensor_close(original_signal_view, tolerance));
                     // Additionally check that reconstructed imaginary parts are near zero
                     for (const auto& val: reconstructed_data)
-                    {
-                        REQUIRE_THAT(val.imag(), Catch::Matchers::WithinAbs(0.0, abs_tolerance));
-                    }
+                      REQUIRE_THAT(val.imag(), Catch::Matchers::WithinAbs(0.0, abs_tolerance));
                 }
             }
         }

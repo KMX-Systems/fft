@@ -20,7 +20,7 @@ namespace kmx::tensor
         return data;
     }
 
-    // === Unit Tests for kmx::tensor::index ===
+    // Unit Tests for kmx::tensor::index
 
     TEST_CASE("kmx::tensor::index - Construction and Rank Constraints", "[tensor][index]")
     {
@@ -253,7 +253,7 @@ namespace kmx::tensor
         }
     }
 
-    // === Unit Tests for kmx::tensor::view ===
+    // Unit Tests for kmx::tensor::view
 
     TEST_CASE("kmx::tensor::view - Construction and Validation", "[tensor][view]")
     {
@@ -474,10 +474,10 @@ namespace kmx::tensor
     {
         std::vector<float> data = create_test_data(12); // 2x2x3 -> flat indices 0..11
         // data view layout:
-        // --- Slice 0 ---
+        // Slice 0
         // [[0. 1. 2.]
         //  [3. 4. 5.]]
-        // --- Slice 1 ---
+        // Slice 1
         // [[6.  7.  8.]
         //  [9. 10. 11.]]
         std::vector<std::size_t> shape_vec = {2, 2, 3};
@@ -554,5 +554,143 @@ namespace kmx::tensor
             REQUIRE(v0d[0] == 99.0f);                     // Flat index 0 is valid for scalar
             REQUIRE_THROWS_AS(v0d[1], std::out_of_range); // Flat index 1 is invalid
         }
+    }
+
+    TEST_CASE("kmx::tensor::view - Variadic Multidimensional operator[]", "[tensor][view][variadic]")
+    {
+        std::vector<float> data = create_test_data(12); // 3x4 = 12
+        const std::array<std::size_t, 2> shape_arr = {3u, 4u};
+        const dimension_shape shape_2d(shape_arr);
+        view<float> v(data, shape_2d);
+        const view<float>& cv = v;
+
+        SECTION("Const access")
+        {
+            REQUIRE(cv[0, 0] == 0.0f);  // flat 0 -> 0
+            REQUIRE(cv[0, 3] == 3.0f);  // flat 3 -> 3
+            REQUIRE(cv[1, 0] == 4.0f);  // flat 4 -> 4
+            REQUIRE(cv[2, 3] == 11.0f); // flat 11 -> 11
+        }
+
+        SECTION("Non-const access and modification")
+        {
+            v[1, 2] = 99.0f; // flat 1*4+2 = 6
+            REQUIRE(v[1, 2] == 99.0f);
+            REQUIRE(cv[1, 2] == 99.0f);
+            REQUIRE(data[6] == 99.0f);
+        }
+
+        SECTION("Out-of-bounds throws")
+        {
+            // Component out of range (row 3 >= shape 3)
+            REQUIRE_THROWS_AS((cv[3, 0]), std::out_of_range);
+        }
+    }
+
+    TEST_CASE("kmx::tensor::view - Const conversion constructor", "[tensor][view][const_conv]")
+    {
+        std::vector<float> data = create_test_data(6);
+        const std::array<std::size_t, 2> shape_arr = {2u, 3u};
+        const dimension_shape shape(shape_arr);
+
+        SECTION("Convert non-const multi-dim view to const view")
+        {
+            view<float> v_mut(data, shape);
+            view<const float> v_const(v_mut); // Converting constructor
+
+            REQUIRE(v_const.rank() == 2);
+            REQUIRE(v_const.size() == 6);
+            REQUIRE(v_const.shape() == v_mut.shape());
+            REQUIRE(v_const.data().data() == v_mut.data().data()); // Same underlying buffer
+            REQUIRE(v_const[0] == 0.0f);
+            REQUIRE(v_const[5] == 5.0f);
+        }
+
+        SECTION("Convert non-const 1D view (deduced shape) to const view")
+        {
+            view<float> v_mut(data); // 1D constructor — shape stored internally
+            view<const float> v_const(v_mut);
+
+            REQUIRE(v_const.rank() == 1);
+            REQUIRE(v_const.size() == 6);
+            REQUIRE(v_const.shape()[0] == 6);
+            REQUIRE(v_const.data().data() == v_mut.data().data());
+        }
+    }
+
+    TEST_CASE("kmx::tensor::view - row_view", "[tensor][view][row_view]")
+    {
+        std::vector<float> data = create_test_data(12); // 3 rows x 4 cols
+        const std::array<std::size_t, 2> shape_arr = {3u, 4u};
+        const dimension_shape shape(shape_arr);
+        view<float> v(data, shape);
+        const view<float>& cv = v;
+
+        SECTION("Non-const row_view returns correct slice")
+        {
+            auto row0 = v.row_view(0);
+            REQUIRE(row0.rank() == 1);
+            REQUIRE(row0.size() == 4);
+            REQUIRE(row0[0] == 0.0f);
+            REQUIRE(row0[3] == 3.0f);
+
+            auto row2 = v.row_view(2);
+            REQUIRE(row2[0] == 8.0f);
+            REQUIRE(row2[3] == 11.0f);
+        }
+
+        SECTION("Const row_view returns correct slice")
+        {
+            auto row1 = cv.row_view(1);
+            REQUIRE(row1.rank() == 1);
+            REQUIRE(row1.size() == 4);
+            REQUIRE(row1[0] == 4.0f);
+            REQUIRE(row1[3] == 7.0f);
+        }
+
+        SECTION("Mutation through row_view reflects in original")
+        {
+            auto row1 = v.row_view(1);
+            row1[2] = 99.0f; // flat index 1*4+2 = 6
+            REQUIRE(data[6] == 99.0f);
+            REQUIRE(v[6] == 99.0f);
+        }
+
+        SECTION("row_view out-of-bounds throws")
+        {
+            REQUIRE_THROWS_AS(v.row_view(3), std::out_of_range);
+            REQUIRE_THROWS_AS(cv.row_view(3), std::out_of_range);
+        }
+
+        SECTION("row_view on non-2D view throws")
+        {
+            view<float> v1d(data); // rank 1
+            REQUIRE_THROWS_AS(v1d.row_view(0), std::logic_error);
+        }
+
+        SECTION("row_view on zero-column view returns empty row")
+        {
+            std::vector<float> empty;
+            const std::array<std::size_t, 2> shape0col_arr = {3u, 0u};
+            const dimension_shape shape0col(shape0col_arr);
+            view<float> v0col(empty, shape0col);
+            auto empty_row = v0col.row_view(0);
+            REQUIRE(empty_row.empty());
+            REQUIRE(empty_row.rank() == 1);
+        }
+    }
+
+    TEST_CASE("kmx::tensor::dimension_shape - Equality", "[tensor][dimension_shape]")
+    {
+        const std::array<std::size_t, 2> a1 = {3u, 4u};
+        const std::array<std::size_t, 2> a2 = {3u, 4u};
+        const std::array<std::size_t, 2> a3 = {4u, 3u};
+        const std::array<std::size_t, 1> a4 = {12u};
+
+        const dimension_shape s1(a1), s2(a2), s3(a3), s4(a4);
+
+        REQUIRE(s1 == s2);
+        REQUIRE_FALSE(s1 == s3); // Same rank, different sizes
+        REQUIRE_FALSE(s1 == s4); // Different rank
     }
 }

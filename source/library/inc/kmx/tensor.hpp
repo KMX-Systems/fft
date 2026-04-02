@@ -20,8 +20,18 @@
 /// @brief Provides classes for tensor-like data structures and operations.
 namespace kmx::tensor
 {
+    /// @brief Concept for a type that satisfies the requirements of a tensor index.
+    template <typename T>
+    concept TensorIndex = requires(const T& t, std::span<const typename T::value_type> shape) {
+        typename T::value_type;
+        typename T::shape_span_type;
+        { t.rank() } -> std::convertible_to<typename T::value_type>;
+        { t.values() } -> std::convertible_to<std::span<const typename T::value_type>>;
+        { t(shape) } -> std::convertible_to<typename T::value_type>;
+    };
+
     // Forward declare view for dimension_shape usage if needed (not strictly required here)
-    template <typename T, typename _IndexType>
+    template <typename T, TensorIndex _IndexType>
     class view;
 
     /// @brief Represents a multi-dimensional index with a fixed maximum rank.
@@ -49,12 +59,12 @@ namespace kmx::tensor
         /// @throws std::invalid_argument If the list size is outside the allowed rank range [`min_rank`, `max_rank`].
         index(std::initializer_list<value_type> il): rank_(static_cast<value_type>(il.size()))
         {
-            if (rank_ < min_rank || rank_ > max_rank) [[unlikely]]
-            {
+            if ((rank_ < min_rank) || (rank_ > max_rank)) [[unlikely]]
                 // Consider using std::format in C++20/23/26 for cleaner formatting if available/preferred
                 throw std::invalid_argument("Initializer list size (" + std::to_string(rank_) + ") is outside the allowed rank range [" +
-                                            std::to_string(min_rank) + ", " + std::to_string(max_rank) + "]");
-            }
+                                            std::to_string(min_rank) +
+                                             ", " + std::to_string(max_rank) + "]");
+
             // std::copy_n is generally efficient for contiguous iterators like initializer_list
             std::copy_n(il.begin(), rank_, indexes_.begin());
         }
@@ -69,22 +79,18 @@ namespace kmx::tensor
         {
             // Use sized_range optimization where possible
             if constexpr (std::ranges::sized_range<R>)
-            {
                 rank_ = static_cast<value_type>(std::ranges::size(range));
-            }
             else // Fallback for input ranges (potentially less efficient)
             {
                 // Note: std::ranges::distance can be O(N) for non-random_access ranges.
                 // Consider requiring forward_range if performance with input iterators is a concern.
-                auto dist = std::ranges::distance(range);
+                const auto dist = std::ranges::distance(range);
                 rank_ = static_cast<value_type>(dist);
             }
 
-            if (rank_ < min_rank || rank_ > max_rank) [[unlikely]]
-            {
+            if ((rank_ < min_rank) || (rank_ > max_rank)) [[unlikely]]
                 throw std::invalid_argument("Input range size (" + std::to_string(rank_) + ") is outside the allowed rank range [" +
                                             std::to_string(min_rank) + ", " + std::to_string(max_rank) + "]");
-            }
 
             // std::ranges::copy_n is efficient
             std::ranges::copy_n(std::ranges::begin(range), rank_, indexes_.begin());
@@ -121,10 +127,8 @@ namespace kmx::tensor
         [[nodiscard]] value_type operator()(shape_span_type shape) const
         {
             if (shape.size() != rank_) [[unlikely]] // Hint for compilers
-            {
                 throw std::invalid_argument("Index rank (" + std::to_string(rank_) + ") mismatch with shape rank (" +
                                             std::to_string(shape.size()) + ")");
-            }
 
             value_type flat_index = 0;
             value_type stride = 1u;
@@ -140,36 +144,32 @@ namespace kmx::tensor
 
                 // Bounds check: Handles size 0 dimensions correctly (any index >= 0 is invalid).
                 if (current_index >= current_dim_size) [[unlikely]]
-                {
                     throw std::out_of_range("Index component " + std::to_string(current_index) + " at dimension " +
                                             std::to_string(dim_index) + " is out of bounds for size " + std::to_string(current_dim_size));
-                }
 
                 // Accumulate flat index contribution from this dimension
                 flat_index += current_index * stride; // Potential overflow if total size is huge (checked in view::validate_size)
 
                 // Update stride for the next dimension outwards, only if not the last dimension
-                if (i + 1u < rank_)
+                if ((i + 1u) < rank_)
                 {
                     // Check for potential overflow *before* multiplication
                     // This check is important for correctness if dimensions are very large.
                     constexpr value_type max_val = std::numeric_limits<value_type>::max();
                     // Avoid division by zero, check current_dim_size > 0
                     if (current_dim_size > 0 && stride > max_val / current_dim_size) [[unlikely]]
-                    {
                         throw std::overflow_error("Stride calculation overflow for shape");
-                    }
+                    
                     stride *= current_dim_size;
+                    
                     // Explicitly handling stride=0 if current_dim_size is 0 prevents potential issues
                     // if the overflow check above has edge cases, and improves clarity.
                     // If dim_size is 0, the total size is 0, so subsequent strides should also be 0.
                     if (current_dim_size == 0) [[unlikely]] // A zero dimension means total size is 0
-                    {
                         stride = 0;
                         // Optimization: If stride becomes 0, further iterations won't change flat_index.
                         // However, the bounds checks for remaining indices still need to run.
                         // Could break early if flat_index calculation was the *only* goal, but bounds checks are required.
-                    }
                 }
             }
 
@@ -225,11 +225,29 @@ namespace kmx::tensor
         // operator!= is automatically synthesized in C++20 and later
     };
 
+    /// @brief Concept for a type that satisfies the requirements of a tensor view.
+    template <typename T>
+    concept TensorView = requires(const T& t) {
+        typename T::value_type;
+        typename T::index_type;
+        typename T::data_span_type;
+        typename T::flat_index_type;
+        
+        { T::is_const_type } -> std::convertible_to<bool>;
+        { t.shape() } -> std::convertible_to<dimension_shape>;
+        { t.data() } -> std::convertible_to<typename T::data_span_type>;
+        { t.rank() } -> std::convertible_to<std::size_t>;
+        { t.size() } -> std::convertible_to<std::size_t>;
+        { t.empty() } -> std::convertible_to<bool>;
+        { t[std::declval<typename T::index_type>()] };
+        { t[std::declval<typename T::flat_index_type>()] };
+    };
+
     /// @brief A non-owning view over a contiguous block of memory, interpreted with a specific shape.
     /// Provides multi-dimensional access ([index]) and flat access ([flat_index]) to the underlying data.
     /// @tparam T The type of elements in the view (can be const).
     /// @tparam _IndexType The type used for multi-dimensional indexing (defaults to `kmx::tensor::index`).
-    template <typename T, typename _IndexType = index>
+    template <typename T, TensorIndex _IndexType = index>
     class view
     {
     public:
@@ -260,23 +278,10 @@ namespace kmx::tensor
         /// @brief Constructs a 1D view (rank 1) over the given data span.
         /// The shape is deduced from the size of the data span.
         /// @param data The `std::span` representing the 1D data.
-        explicit constexpr view(data_span_type data): data_(data) // Initialize data_ first
+        explicit constexpr view(data_span_type data): data_(data)
         {
-            // Deduce shape for 1D case
-            if (data.empty())
-            {
-                // Represent empty 1D view as rank 1, shape {0}.
-                shape_storage_1d_[0] = 0;
-                shape_ = dimension_shape(shape_storage_1d_.data(), 1); // Point shape_ to internal storage
-            }
-            else
-            {
-                // Use internal storage for the single dimension size
-                shape_storage_1d_[0] = data.size();
-                // Point shape_ span to the internal storage
-                shape_ = dimension_shape(shape_storage_1d_.data(), 1);
-            }
-            // Size validation is implicitly correct by construction here.
+            shape_storage_1d_[0] = data.size(); // Works for both empty (0) and non-empty spans
+            shape_ = dimension_shape(shape_storage_1d_.data(), 1);
         }
 
         // Defaulted copy/move constructors and assignment operators (perform efficient shallow copies).
@@ -334,10 +339,9 @@ namespace kmx::tensor
             const flat_index_type flat_idx = idx(shape_);
             // Additional check: Ensure flat index is within the bounds of the data span itself.
             if (flat_idx >= size()) [[unlikely]]
-            {
                 throw std::out_of_range("Calculated flat index (" + std::to_string(flat_idx) + ") is out of range for view size (" +
                                         std::to_string(size()) + ")");
-            }
+
             // Use span::operator[] which is unchecked in standard C++, but we just checked bounds.
             return data_[flat_idx];
             // Alternatively, use data_.at(flat_idx); if preferred for guaranteed check (might incur overhead).
@@ -350,15 +354,29 @@ namespace kmx::tensor
         /// @throws std::invalid_argument If `idx.rank()` does not match `this->rank()`.
         /// @throws std::out_of_range If `idx` is out of bounds according to `shape()` or the calculated flat index exceeds `size()`.
         [[nodiscard]] value_type& operator[](const index_type& idx)
-            requires(!is_const_type) // C++20 requires clause for SFINAE
+            requires(!is_const_type) // C++20 requires clause
         {
             const flat_index_type flat_idx = idx(shape_);
             if (flat_idx >= size()) [[unlikely]]
-            {
                 throw std::out_of_range("Calculated flat index (" + std::to_string(flat_idx) + ") is out of range for view size (" +
                                         std::to_string(size()) + ")");
-            }
             return data_[flat_idx];
+        }
+
+        /// @brief Const multidimensional access using variadic arguments (C++23 feature).
+        template <std::integral... Args>
+        [[nodiscard]] const value_type& operator[](Args... indices) const
+            requires (sizeof...(Args) > 1) // Only for multiple dimensions to prevent shadowing flat index accessor
+        {
+            return (*this)[index_type{static_cast<typename index_type::value_type>(indices)...}];
+        }
+
+        /// @brief Non-const multidimensional access using variadic arguments (C++23 feature).
+        template <std::integral... Args>
+        [[nodiscard]] value_type& operator[](Args... indices)
+            requires (!is_const_type && sizeof...(Args) > 1) // Only for multiple dimensions
+        {
+            return (*this)[index_type{static_cast<typename index_type::value_type>(indices)...}];
         }
 
         /// @brief Const access to an element using a flat (linear) index.
@@ -370,10 +388,8 @@ namespace kmx::tensor
         {
             // Explicit bounds check for flat index access.
             if (flat_idx >= size()) [[unlikely]]
-            {
                 throw std::out_of_range("Flat index (" + std::to_string(flat_idx) + ") out of range for view size (" +
                                         std::to_string(size()) + ")");
-            }
             return data_[flat_idx];
         }
 
@@ -387,14 +403,12 @@ namespace kmx::tensor
             requires(!is_const_type) // C++20 requires clause
         {
             if (flat_idx >= size()) [[unlikely]]
-            {
                 throw std::out_of_range("Flat index (" + std::to_string(flat_idx) + ") out of range for view size (" +
                                         std::to_string(size()) + ")");
-            }
             return data_[flat_idx];
         }
 
-        // --- Sub-view Creation ---
+        // Sub-view Creation
 
         /// @brief Creates a const 1D view of a specific row. Requires the current view to be 2D.
         /// @param row_index The zero-based index of the row to view.
@@ -404,24 +418,19 @@ namespace kmx::tensor
         [[nodiscard]] view<const value_type, _IndexType> row_view(std::size_t row_index) const
         {
             if (rank() != 2) [[unlikely]]
-            {
                 throw std::logic_error("row_view requires a 2D tensor view (rank 2), current rank is " + std::to_string(rank()));
-            }
+
             // Assume shape has at least 2 elements due to rank check
             const std::size_t rows = shape()[0];
             const std::size_t cols = shape()[1];
 
             if (row_index >= rows) [[unlikely]]
-            {
                 throw std::out_of_range("Row index " + std::to_string(row_index) + " out of range for " + std::to_string(rows) + " rows");
-            }
 
             // Handle zero columns case efficiently: return empty 1D view
             if (cols == 0) [[unlikely]]
-            {
                 // Construct using empty span, which results in rank 1, shape {0} via 1D constructor
                 return view<const value_type, _IndexType>(data_span_type {});
-            }
 
             // Calculate start offset and size for the row's data slice
             // Overflow check: row_index * cols could overflow if rows/cols are huge.
@@ -430,7 +439,7 @@ namespace kmx::tensor
 
             // Create a subspan representing the row's data
             // subspan itself performs bounds checks in debug builds usually.
-            data_span_type row_data_span = data_.subspan(start_offset, cols);
+            const data_span_type row_data_span = data_.subspan(start_offset, cols);
 
             // Return a new 1D view using the 1D view constructor (efficiently sets up shape)
             return view<const value_type, _IndexType>(row_data_span);
@@ -446,31 +455,26 @@ namespace kmx::tensor
             requires(!is_const_type) // C++20 requires clause
         {
             if (rank() != 2) [[unlikely]]
-            {
                 throw std::logic_error("row_view requires a 2D tensor view (rank 2), current rank is " + std::to_string(rank()));
-            }
+
             const std::size_t rows = shape()[0];
             const std::size_t cols = shape()[1];
             if (row_index >= rows) [[unlikely]]
-            {
                 throw std::out_of_range("Row index " + std::to_string(row_index) + " out of range for " + std::to_string(rows) + " rows");
-            }
 
             if (cols == 0) [[unlikely]]
-            {
                 // Use span of non-const type
                 return view<non_const_value_type, _IndexType>(std::span<non_const_value_type> {});
-            }
 
             const std::size_t start_offset = row_index * cols;
             // Implicit conversion from span<T> to span<non_const_value_type> works here.
-            std::span<non_const_value_type> row_data_span = data_.subspan(start_offset, cols);
+            const std::span<non_const_value_type> row_data_span = data_.subspan(start_offset, cols);
 
             // Return a new 1D view using the 1D view constructor
             return view<non_const_value_type, _IndexType>(row_data_span);
         }
 
-        // --- Internal helpers for const conversion ---
+        // Internal helpers for const conversion
         // These are needed because dimension_shape doesn't own data.
         // If shape_ points to internal storage, the converting constructor needs access.
 
@@ -503,9 +507,7 @@ namespace kmx::tensor
             {
                 // Check for zero dimension first, as it dictates the final size is 0.
                 if (std::ranges::find(shape_, 0u) != shape_.end())
-                {
                     expected_size_ull = 0u;
-                }
                 else
                 {
                     // Calculate product only if no zero dimension exists.
@@ -514,9 +516,7 @@ namespace kmx::tensor
                     // Check for overflow against size_t::max.
                     constexpr auto max_size_t_ull = static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max());
                     if (expected_size_ull > max_size_t_ull) [[unlikely]]
-                    {
                         throw std::overflow_error("Product of dimensions exceeds maximum size_t");
-                    }
                 }
             }
             // Note: If shape_ is empty (rank 0), expected_size_ull remains 1 (scalar).
@@ -529,12 +529,9 @@ namespace kmx::tensor
                 // Create shape string for error message (can be simplified or made more efficient if needed)
                 std::string shape_str = "[";
                 if (!shape_.empty())
-                {
                     for (size_t i = 0; i < shape_.size(); ++i)
-                    {
                         shape_str += std::to_string(shape_[i]) + (i == shape_.size() - 1 ? "" : ", ");
-                    }
-                }
+
                 shape_str += "]";
                 if (shape_.empty())
                     shape_str = "<rank 0>"; // Special case description
@@ -546,7 +543,7 @@ namespace kmx::tensor
         }
 
         /// @brief Friend declaration to allow const conversion constructor access to private members.
-        template <typename OtherT, typename OtherIndexType>
+        template <typename OtherT, TensorIndex OtherIndexType>
         friend class view; // Grant access to other view instantiations
     };
 
