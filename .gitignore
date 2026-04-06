@@ -30,4 +30,11 @@
 # Other
 *.user
 build
+debug
+default
+release
+source/build
+source/default
+source/release
+fftw_compare
 *.spv

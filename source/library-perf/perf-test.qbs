@@ -1,31 +1,14 @@
 import qbs
 
 CppApplication {
-    Depends
-    {
-        name: 'fft-lib'
-    }
+    Depends { name: "fft-lib" }
 
-    name: "fft-test"
+    name: "fft-perf"
     consoleApplication: true
 
-    files: [
-        "src/kmx/fft_test.cpp",
-        "src/kmx/tensor_test.cpp",
-    ]
     cpp.cxxLanguageVersion: "c++26"
     cpp.enableRtti: false
-    cpp.includePaths: [
-        "inc",
-        "inc_dep"
-    ]
-    cpp.systemIncludePaths: [
-        "/usr/local/include"
-    ]
-    cpp.staticLibraries: [
-        "/usr/local/lib/libCatch2Main.a",
-        "/usr/local/lib/libCatch2.a"
-    ]
+    cpp.includePaths: ["../library/inc"]
 
     Properties {
         condition: qbs.buildVariant === "debug"
@@ -38,7 +21,15 @@ CppApplication {
         cpp.debugInformation: false
         cpp.optimization: "fast"
         cpp.defines: ["NDEBUG"]
-        cpp.commonCompilerFlags: ["-O3", "-march=native", "-flto=auto"]
+        cpp.commonCompilerFlags: ["-O3", "-march=native", "-flto=auto", "-funroll-loops", "-fomit-frame-pointer"]
         cpp.linkerFlags: ["-flto=auto"]
     }
+
+    Properties {
+        condition: project.useAvx2
+        cpp.cxxFlags: ["-mavx2", "-mfma", "-fopenmp"]
+        cpp.driverLinkerFlags: ["-fopenmp"]
+    }
+
+    files: ["perf-test.cpp"]
 }

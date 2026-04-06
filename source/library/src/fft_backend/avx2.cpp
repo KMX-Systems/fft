@@ -1,0 +1,358 @@
+// Copyright (c) 2026 - present KMX Systems. All rights reserved.
+
+#include <array>
+#include <complex>
+#include <numbers>
+#include <span>
+
+#include <kmx/fft_backend/avx2.hpp>
+
+namespace kmx::fft::backend::avx2_detail {
+namespace {
+
+constexpr double kInvSqrt2 = 0.707106781186547524400844362104849039;
+constexpr double kCosPi8   = 0.923879532511286756128183189396788286;
+constexpr double kSinPi8   = 0.382683432365089771728459984030398867;
+
+void fft4_core(std::complex<double>* x, bool inverse) noexcept {
+    const std::complex<double> a0 = x[0] + x[2];
+    const std::complex<double> a1 = x[0] - x[2];
+    const std::complex<double> a2 = x[1] + x[3];
+    const std::complex<double> d  = x[1] - x[3];
+    const std::complex<double> a3 = inverse
+        ? std::complex<double>(d.imag(), -d.real())
+        : std::complex<double>(-d.imag(), d.real());
+    x[0] = a0 + a2;
+    x[1] = a1 + a3;
+    x[2] = a0 - a2;
+    x[3] = a1 - a3;
+}
+
+template <std::size_t N, bool Inverse>
+[[nodiscard]] const std::array<std::complex<double>, N / 2>& fixed_twiddles() noexcept {
+    static const std::array<std::complex<double>, N / 2> table = [] {
+        std::array<std::complex<double>, N / 2> out{};
+        constexpr double sign = Inverse ? 1.0 : -1.0;
+        constexpr double two_pi = 2.0 * std::numbers::pi_v<double>;
+        for (std::size_t k = 0; k < N / 2; ++k) {
+            const double theta = two_pi * static_cast<double>(k) / static_cast<double>(N);
+            out[k] = {std::cos(theta), sign * std::sin(theta)};
+        }
+        return out;
+    }();
+    return table;
+}
+
+template <std::size_t N, bool Inverse>
+[[nodiscard]] const std::array<std::complex<double>, N>& full_twiddles() noexcept {
+    static const std::array<std::complex<double>, N> table = [] {
+        std::array<std::complex<double>, N> out{};
+        constexpr double sign = Inverse ? 1.0 : -1.0;
+        constexpr double two_pi = 2.0 * std::numbers::pi_v<double>;
+        for (std::size_t k = 0; k < N; ++k) {
+            const double theta = two_pi * static_cast<double>(k) / static_cast<double>(N);
+            out[k] = {std::cos(theta), sign * std::sin(theta)};
+        }
+        return out;
+    }();
+    return table;
+}
+
+template <std::size_t N>
+void codelet_fixed_core(std::complex<double>* x, bool inverse) noexcept {
+    if constexpr (N == 2) {
+        const std::complex<double> a = x[0];
+        const std::complex<double> b = x[1];
+        x[0] = a + b;
+        x[1] = a - b;
+    } else if constexpr (N == 4) {
+        fft4_core(x, inverse);
+    } else {
+        std::array<std::complex<double>, N / 2> even{};
+        std::array<std::complex<double>, N / 2> odd{};
+        for (std::size_t i = 0; i < N / 2; ++i) {
+            even[i] = x[2 * i];
+            odd[i] = x[2 * i + 1];
+        }
+
+        codelet_fixed_core<N / 2>(even.data(), inverse);
+        codelet_fixed_core<N / 2>(odd.data(), inverse);
+
+        const auto& tw = inverse ? fixed_twiddles<N, true>() : fixed_twiddles<N, false>();
+        for (std::size_t k = 0; k < N / 2; ++k) {
+            const std::complex<double> t = odd[k] * tw[k];
+            x[k] = even[k] + t;
+            x[k + (N / 2)] = even[k] - t;
+        }
+    }
+}
+
+template <std::size_t N>
+void codelet_fixed(double* __restrict__ d, bool inverse) noexcept {
+    auto* x = reinterpret_cast<std::complex<double>*>(d);
+    codelet_fixed_core<N>(x, inverse);
+    if (inverse) {
+        const double scale = 1.0 / static_cast<double>(N);
+        for (auto& v : std::span<std::complex<double>>(x, N)) v *= scale;
+    }
+}
+
+void codelet_3_impl(std::complex<double>* x, bool inverse) noexcept {
+    const auto& tw = inverse ? full_twiddles<3, true>() : full_twiddles<3, false>();
+    const std::complex<double> y0 = x[0] + x[1] + x[2];
+    const std::complex<double> y1 = x[0] + x[1] * tw[1] + x[2] * tw[2];
+    const std::complex<double> y2 = x[0] + x[1] * tw[2] + x[2] * tw[1];
+    x[0] = y0;
+    x[1] = y1;
+    x[2] = y2;
+    if (inverse) {
+        for (auto& v : std::span<std::complex<double>>(x, 3)) v *= (1.0 / 3.0);
+    }
+}
+
+void codelet_5_impl(std::complex<double>* x, bool inverse) noexcept {
+    const auto& tw = inverse ? full_twiddles<5, true>() : full_twiddles<5, false>();
+    const std::complex<double> y0 = x[0] + x[1] + x[2] + x[3] + x[4];
+    const std::complex<double> y1 = x[0] + x[1] * tw[1] + x[2] * tw[2] + x[3] * tw[3] + x[4] * tw[4];
+    const std::complex<double> y2 = x[0] + x[1] * tw[2] + x[2] * tw[4] + x[3] * tw[1] + x[4] * tw[3];
+    const std::complex<double> y3 = x[0] + x[1] * tw[3] + x[2] * tw[1] + x[3] * tw[4] + x[4] * tw[2];
+    const std::complex<double> y4 = x[0] + x[1] * tw[4] + x[2] * tw[3] + x[3] * tw[2] + x[4] * tw[1];
+    x[0] = y0;
+    x[1] = y1;
+    x[2] = y2;
+    x[3] = y3;
+    x[4] = y4;
+    if (inverse) {
+        for (auto& v : std::span<std::complex<double>>(x, 5)) v *= 0.2;
+    }
+}
+
+template <std::size_t N>
+void smooth_fixed_core(std::complex<double>* x, bool inverse) noexcept {
+    if constexpr (N == 1) {
+        return;
+    } else if constexpr (N == 2) {
+        codelet_2(reinterpret_cast<double*>(x), inverse);
+    } else if constexpr (N == 3) {
+        codelet_3_impl(x, inverse);
+    } else if constexpr (N == 4) {
+        codelet_4(reinterpret_cast<double*>(x), inverse);
+    } else if constexpr (N == 5) {
+        codelet_5_impl(x, inverse);
+    } else if constexpr (N == 8) {
+        codelet_8(reinterpret_cast<double*>(x), inverse);
+    } else if constexpr (N == 16) {
+        codelet_16(reinterpret_cast<double*>(x), inverse);
+    } else {
+        constexpr std::size_t radix = (N % 5u) == 0u ? 5u : ((N % 3u) == 0u ? 3u : 2u);
+        constexpr std::size_t M = N / radix;
+        std::array<std::complex<double>, N> scratch{};
+
+        if constexpr (radix == 2u) {
+            for (std::size_t q = 0; q < M; ++q) {
+                scratch[q] = x[q * 2u];
+                scratch[M + q] = x[q * 2u + 1u];
+            }
+        } else if constexpr (radix == 3u) {
+            for (std::size_t q = 0; q < M; ++q) {
+                scratch[q] = x[q * 3u];
+                scratch[M + q] = x[q * 3u + 1u];
+                scratch[2u * M + q] = x[q * 3u + 2u];
+            }
+        } else {
+            for (std::size_t q = 0; q < M; ++q) {
+                scratch[q] = x[q * 5u];
+                scratch[M + q] = x[q * 5u + 1u];
+                scratch[2u * M + q] = x[q * 5u + 2u];
+                scratch[3u * M + q] = x[q * 5u + 3u];
+                scratch[4u * M + q] = x[q * 5u + 4u];
+            }
+        }
+
+        for (std::size_t j = 0; j < radix; ++j)
+            smooth_fixed_core<M>(scratch.data() + j * M, inverse);
+
+        const auto& tw_n = inverse ? full_twiddles<N, true>() : full_twiddles<N, false>();
+        const double inv_radix = 1.0 / static_cast<double>(radix);
+
+        if constexpr (radix == 2u) {
+            const auto* s0 = scratch.data();
+            const auto* s1 = scratch.data() + M;
+            for (std::size_t q = 0; q < M; ++q) {
+                const std::complex<double> v0 = s0[q];
+                const std::complex<double> v1 = s1[q] * tw_n[q];
+                const std::complex<double> y0 = v0 + v1;
+                const std::complex<double> y1 = v0 - v1;
+                x[q] = inverse ? y0 * inv_radix : y0;
+                x[q + M] = inverse ? y1 * inv_radix : y1;
+            }
+        } else if constexpr (radix == 3u) {
+            const auto& tw_r = inverse ? full_twiddles<3, true>() : full_twiddles<3, false>();
+            const auto* s0 = scratch.data();
+            const auto* s1 = scratch.data() + M;
+            const auto* s2 = scratch.data() + 2u * M;
+            for (std::size_t q = 0; q < M; ++q) {
+                const std::complex<double> v0 = s0[q];
+                const std::complex<double> v1 = s1[q] * tw_n[q];
+                const std::complex<double> v2 = s2[q] * tw_n[2u * q];
+                const std::complex<double> y0 = v0 + v1 + v2;
+                const std::complex<double> y1 = v0 + v1 * tw_r[1] + v2 * tw_r[2];
+                const std::complex<double> y2 = v0 + v1 * tw_r[2] + v2 * tw_r[1];
+                x[q] = inverse ? y0 * inv_radix : y0;
+                x[q + M] = inverse ? y1 * inv_radix : y1;
+                x[q + 2u * M] = inverse ? y2 * inv_radix : y2;
+            }
+        } else {
+            const auto& tw_r = inverse ? full_twiddles<5, true>() : full_twiddles<5, false>();
+            const auto* s0 = scratch.data();
+            const auto* s1 = scratch.data() + M;
+            const auto* s2 = scratch.data() + 2u * M;
+            const auto* s3 = scratch.data() + 3u * M;
+            const auto* s4 = scratch.data() + 4u * M;
+            for (std::size_t q = 0; q < M; ++q) {
+                const std::complex<double> v0 = s0[q];
+                const std::complex<double> v1 = s1[q] * tw_n[q];
+                const std::complex<double> v2 = s2[q] * tw_n[2u * q];
+                const std::complex<double> v3 = s3[q] * tw_n[3u * q];
+                const std::complex<double> v4 = s4[q] * tw_n[4u * q];
+                const std::complex<double> y0 = v0 + v1 + v2 + v3 + v4;
+                const std::complex<double> y1 = v0 + v1 * tw_r[1] + v2 * tw_r[2] + v3 * tw_r[3] + v4 * tw_r[4];
+                const std::complex<double> y2 = v0 + v1 * tw_r[2] + v2 * tw_r[4] + v3 * tw_r[1] + v4 * tw_r[3];
+                const std::complex<double> y3 = v0 + v1 * tw_r[3] + v2 * tw_r[1] + v3 * tw_r[4] + v4 * tw_r[2];
+                const std::complex<double> y4 = v0 + v1 * tw_r[4] + v2 * tw_r[3] + v3 * tw_r[2] + v4 * tw_r[1];
+                x[q] = inverse ? y0 * inv_radix : y0;
+                x[q + M] = inverse ? y1 * inv_radix : y1;
+                x[q + 2u * M] = inverse ? y2 * inv_radix : y2;
+                x[q + 3u * M] = inverse ? y3 * inv_radix : y3;
+                x[q + 4u * M] = inverse ? y4 * inv_radix : y4;
+            }
+        }
+    }
+}
+
+} // namespace
+
+void codelet_2(double* __restrict__ d, bool inverse) noexcept {
+    const double r0 = d[0], i0 = d[1], r1 = d[2], i1 = d[3];
+    if (!inverse) {
+        d[0]=r0+r1; d[1]=i0+i1; d[2]=r0-r1; d[3]=i0-i1;
+    } else {
+        d[0]=(r0+r1)*0.5; d[1]=(i0+i1)*0.5; d[2]=(r0-r1)*0.5; d[3]=(i0-i1)*0.5;
+    }
+}
+
+void codelet_4(double* __restrict__ d, bool inverse) noexcept {
+    double r0=d[0],i0=d[1],r1=d[2],i1=d[3],r2=d[4],i2=d[5],r3=d[6],i3=d[7];
+    double a0=r0+r2,b0=i0+i2,a1=r0-r2,b1=i0-i2;
+    double a2=r1+r3,b2=i1+i3,a3=r1-r3,b3=i1-i3;
+    if (!inverse) {
+        d[0]=a0+a2; d[1]=b0+b2;
+        d[2]=a1+b3; d[3]=b1-a3;
+        d[4]=a0-a2; d[5]=b0-b2;
+        d[6]=a1-b3; d[7]=b1+a3;
+    } else {
+        d[0]=(a0+a2)*0.25; d[1]=(b0+b2)*0.25;
+        d[2]=(a1-b3)*0.25; d[3]=(b1+a3)*0.25;
+        d[4]=(a0-a2)*0.25; d[5]=(b0-b2)*0.25;
+        d[6]=(a1+b3)*0.25; d[7]=(b1-a3)*0.25;
+    }
+}
+
+void codelet_8(double* __restrict__ d, bool inverse) noexcept {
+    auto* x = reinterpret_cast<std::complex<double>*>(d);
+    std::array<std::complex<double>, 4> even{x[0], x[2], x[4], x[6]};
+    std::array<std::complex<double>, 4> odd{x[1], x[3], x[5], x[7]};
+    fft4_core(even.data(), inverse);
+    fft4_core(odd.data(), inverse);
+
+    const double imag_sign = inverse ? 1.0 : -1.0;
+    const std::array<std::complex<double>, 4> tw{
+        std::complex<double>(1.0, 0.0),
+        std::complex<double>(kInvSqrt2, imag_sign * kInvSqrt2),
+        std::complex<double>(0.0, imag_sign),
+        std::complex<double>(-kInvSqrt2, imag_sign * kInvSqrt2),
+    };
+
+    for (std::size_t k = 0; k < 4; ++k) {
+        const std::complex<double> t = odd[k] * tw[k];
+        x[k] = even[k] + t;
+        x[k + 4] = even[k] - t;
+    }
+
+    if (inverse) {
+        for (auto& v : std::span<std::complex<double>>(x, 8)) v *= 0.125;
+    }
+}
+
+void codelet_16(double* __restrict__ d, bool inverse) noexcept {
+    auto* x = reinterpret_cast<std::complex<double>*>(d);
+    std::array<std::complex<double>, 8> even{};
+    std::array<std::complex<double>, 8> odd{};
+    for (std::size_t i = 0; i < 8; ++i) {
+        even[i] = x[2 * i];
+        odd[i] = x[2 * i + 1];
+    }
+
+    codelet_8(reinterpret_cast<double*>(even.data()), false);
+    codelet_8(reinterpret_cast<double*>(odd.data()), false);
+    if (inverse) {
+        for (auto& v : even) v *= 8.0;
+        for (auto& v : odd) v *= 8.0;
+    }
+
+    const double imag_sign = inverse ? 1.0 : -1.0;
+    const std::array<std::complex<double>, 8> tw{
+        std::complex<double>(1.0, 0.0),
+        std::complex<double>(kCosPi8, imag_sign * kSinPi8),
+        std::complex<double>(kInvSqrt2, imag_sign * kInvSqrt2),
+        std::complex<double>(kSinPi8, imag_sign * kCosPi8),
+        std::complex<double>(0.0, imag_sign),
+        std::complex<double>(-kSinPi8, imag_sign * kCosPi8),
+        std::complex<double>(-kInvSqrt2, imag_sign * kInvSqrt2),
+        std::complex<double>(-kCosPi8, imag_sign * kSinPi8),
+    };
+
+    for (std::size_t k = 0; k < 8; ++k) {
+        const std::complex<double> t = odd[k] * tw[k];
+        x[k] = even[k] + t;
+        x[k + 8] = even[k] - t;
+    }
+
+    if (inverse) {
+        for (auto& v : std::span<std::complex<double>>(x, 16)) v *= 0.0625;
+    }
+}
+
+void codelet_32(double* __restrict__ d, bool inverse) noexcept {
+    codelet_fixed<32>(d, inverse);
+}
+
+void codelet_64(double* __restrict__ d, bool inverse) noexcept {
+    codelet_fixed<64>(d, inverse);
+}
+
+void codelet_128(double* __restrict__ d, bool inverse) noexcept {
+    codelet_fixed<128>(d, inverse);
+}
+
+void codelet_256(double* __restrict__ d, bool inverse) noexcept {
+    codelet_fixed<256>(d, inverse);
+}
+
+void codelet_512(double* __restrict__ d, bool inverse) noexcept {
+    codelet_fixed<512>(d, inverse);
+}
+
+void smooth_100(double* __restrict__ d, bool inverse) noexcept {
+    smooth_fixed_core<100>(reinterpret_cast<std::complex<double>*>(d), inverse);
+}
+
+void smooth_1000(double* __restrict__ d, bool inverse) noexcept {
+    smooth_fixed_core<1000>(reinterpret_cast<std::complex<double>*>(d), inverse);
+}
+
+void smooth_1500(double* __restrict__ d, bool inverse) noexcept {
+    smooth_fixed_core<1500>(reinterpret_cast<std::complex<double>*>(d), inverse);
+}
+
+} // namespace kmx::fft::backend::avx2_detail
