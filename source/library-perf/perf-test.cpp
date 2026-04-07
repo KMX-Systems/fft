@@ -10,7 +10,11 @@
 #include <numbers>
 #include <random>
 // Select Engine based on macros
-#if defined(KMX_FFT_ENABLE_AVX2)
+#if defined(KMX_FFT_USE_DYNAMIC_ENGINE)
+template <typename T>
+using tested_engine = kmx::fft::dynamic_engine<std::complex<T>>;
+#define KMX_FFT_ENGINE_NAME "Dynamic Engine"
+#elif defined(KMX_FFT_ENABLE_AVX2)
 #include <kmx/fft_backend/avx2.hpp>
 template <typename T>
 using tested_engine = kmx::fft::engine<std::complex<T>, kmx::fft::backend::avx2<std::complex<T>>>;
@@ -25,7 +29,18 @@ template <typename T>
 using tested_engine = kmx::fft::engine<std::complex<T>, kmx::fft::backend::software<std::complex<T>>>;
 #define KMX_FFT_ENGINE_NAME "Software"
 #endif
-#include <vector>
+
+#if defined(KMX_FFT_USE_DYNAMIC_ENGINE)
+template <typename Plan>
+const char* plan_strategy(const Plan& plan) { return kmx::fft::backend::to_string(plan.routed_id); }
+template <typename Engine>
+const char* engine_strategy(const Engine& eng) { return kmx::fft::backend::to_string(eng.get_last_strategy()); }
+#else
+template <typename Plan>
+const char* plan_strategy(const Plan&) { return "avx2"; }
+template <typename Engine>
+const char* engine_strategy(const Engine&) { return ""; }
+#endif
 
 namespace
 {
@@ -67,13 +82,13 @@ namespace
 
     void print_header()
     {
-        std::printf("\n%-40s %10s %10s %10s\n", "Benchmark", "N", "Cold µs", "Warm µs (med)");
-        std::printf("%-40s %10s %10s %10s\n", "---", "---", "---", "---");
+        std::printf("\n%-40s %10s %10s %10s %10s\n", "Benchmark", "N", "Cold µs", "Warm µs (med)", "Strategy");
+        std::printf("%-40s %10s %10s %10s %10s\n", "---", "---", "---", "---", "---");
     }
 
-    void print_row(const char* name, const std::size_t n, const double cold_us, const double warm_us)
+    void print_row(const char* name, const std::size_t n, const double cold_us, const double warm_us, const char* strategy = "")
     {
-        std::printf("%-40s %10zu %10.1f %10.1f\n", name, n, cold_us, warm_us);
+        std::printf("%-40s %10zu %10.1f %10.1f [%8s]\n", name, n, cold_us, warm_us, strategy);
     }
 
     // -------------------------------------------------------------------------
@@ -101,7 +116,7 @@ namespace
             eng.transform_1d(v);
         });
 
-        print_row(label, n, cold_us, warm_us);
+        print_row(label, n, cold_us, warm_us, engine_strategy(eng));
     }
 
     // -------------------------------------------------------------------------
@@ -128,7 +143,7 @@ namespace
             eng.transform_1d(v, true);
         });
 
-        print_row(label, n, 0.0, warm_us);
+        print_row(label, n, 0.0, warm_us, engine_strategy(eng));
     }
 
     // -------------------------------------------------------------------------
@@ -159,7 +174,7 @@ namespace
             eng.transform_2d(v);
         });
 
-        print_row(label, n, cold_us, warm_us);
+        print_row(label, n, cold_us, warm_us, engine_strategy(eng));
     }
 
     // -------------------------------------------------------------------------
@@ -186,7 +201,7 @@ namespace
             eng.transform_1d(in, out);
         });
 
-        print_row(label, n, 0.0, warm_us);
+        print_row(label, n, 0.0, warm_us, engine_strategy(eng));
     }
 } // anonymous namespace
 
@@ -199,6 +214,9 @@ int main()
     // 1-D double — power-of-2
     // ------------------------------------------------------------------
     print_header();
+    bench_1d<double>(8,     "1D double  N=8     (pow2)");
+    bench_1d<double>(16,    "1D double  N=16    (pow2)");
+    bench_1d<double>(32,    "1D double  N=32    (pow2)");
     bench_1d<double>(64,    "1D double  N=64    (pow2)");
     bench_1d<double>(256,   "1D double  N=256   (pow2)");
     bench_1d<double>(1024,  "1D double  N=1024  (pow2)");
@@ -208,6 +226,9 @@ int main()
     // ------------------------------------------------------------------
     // 1-D double — non-power-of-2 (Bluestein)
     // ------------------------------------------------------------------
+    bench_1d<double>(5,    "1D double  N=5     (Bluestein)");
+    bench_1d<double>(11,   "1D double  N=11    (Bluestein)");
+    bench_1d<double>(15,   "1D double  N=15    (Bluestein)");
     bench_1d<double>(100,  "1D double  N=100   (Bluestein)");
     bench_1d<double>(1000, "1D double  N=1000  (Bluestein)");
     bench_1d<double>(1500, "1D double  N=1500  (Bluestein)");
@@ -243,6 +264,8 @@ int main()
     bench_2d<double>(64,  64,  "2D double  64x64");
     bench_2d<double>(128, 128, "2D double  128x128");
     bench_2d<double>(256, 256, "2D double  256x256");
+    bench_2d<double>(1024, 1024, "2D double  1024x1024");
+    bench_2d<double>(2048, 2048, "2D double  2048x2048");
     bench_2d<float> (128, 128, "2D float   128x128");
     bench_2d<float> (256, 256, "2D float   256x256");
 

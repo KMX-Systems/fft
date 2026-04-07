@@ -13,7 +13,9 @@ StaticLibrary {
     name: "fft-lib"
     files: [
         "inc/kmx/fft.hpp",
+        "inc/kmx/fft_router.hpp",
         "inc/kmx/fft_backend/concepts.hpp",
+        "inc/kmx/fft_backend/capabilities.hpp",
         "inc/kmx/fft_backend/software.hpp",
         "inc/kmx/tensor.hpp",
     ]

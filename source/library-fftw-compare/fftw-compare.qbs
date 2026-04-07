@@ -21,7 +21,7 @@ CppApplication {
         condition: qbs.buildVariant === "release"
         cpp.debugInformation: false
         cpp.optimization: "fast"
-        cpp.defines: ["NDEBUG"]
+        cpp.defines: ["NDEBUG", "KMX_FFT_USE_DYNAMIC_ENGINE"]
         cpp.commonCompilerFlags: ["-O3", "-march=native", "-flto=auto", "-funroll-loops", "-fomit-frame-pointer"]
         cpp.linkerFlags: ["-flto=auto"]
     }

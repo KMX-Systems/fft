@@ -2,6 +2,7 @@
 
 #include <array>
 #include <complex>
+#include <immintrin.h>
 #include <numbers>
 #include <span>
 
@@ -13,6 +14,14 @@ namespace {
 constexpr double kInvSqrt2 = 0.707106781186547524400844362104849039;
 constexpr double kCosPi8   = 0.923879532511286756128183189396788286;
 constexpr double kSinPi8   = 0.382683432365089771728459984030398867;
+
+// FMA complex multiply for two complex doubles packed in one __m256d
+[[nodiscard]] inline __m256d cmul_pd_local(__m256d a, __m256d b) noexcept {
+    __m256d a_re   = _mm256_unpacklo_pd(a, a);
+    __m256d a_im   = _mm256_unpackhi_pd(a, a);
+    __m256d b_shuf = _mm256_shuffle_pd(b, b, 0x5);
+    return _mm256_fmaddsub_pd(a_re, b, _mm256_mul_pd(a_im, b_shuf));
+}
 
 void fft4_core(std::complex<double>* x, bool inverse) noexcept {
     const std::complex<double> a0 = x[0] + x[2];
@@ -66,23 +75,62 @@ void codelet_fixed_core(std::complex<double>* x, bool inverse) noexcept {
         x[0] = a + b;
         x[1] = a - b;
     } else if constexpr (N == 4) {
-        fft4_core(x, inverse);
+        fft4_core(x, !inverse);
     } else {
         std::array<std::complex<double>, N / 2> even{};
         std::array<std::complex<double>, N / 2> odd{};
-        for (std::size_t i = 0; i < N / 2; ++i) {
-            even[i] = x[2 * i];
-            odd[i] = x[2 * i + 1];
+
+        // AVX2 deinterleave: even[i] = x[2i], odd[i] = x[2i+1]
+        // Process 2 complex-double pairs at a time (4 complex doubles = 8 doubles = 2 AVX2 loads)
+        {
+            const double* xp = reinterpret_cast<const double*>(x);
+            double* ep = reinterpret_cast<double*>(even.data());
+            double* op = reinterpret_cast<double*>(odd.data());
+            std::size_t i = 0;
+            for (; i + 1 < N / 2; i += 2) {
+                // v0 = [x[2i].re, x[2i].im, x[2i+1].re, x[2i+1].im]
+                // v1 = [x[2i+2].re, x[2i+2].im, x[2i+3].re, x[2i+3].im]
+                __m256d v0 = _mm256_loadu_pd(xp + i * 4);
+                __m256d v1 = _mm256_loadu_pd(xp + i * 4 + 4);
+                // Deinterleave: even = low 128-bit halves of v0, v1; odd = high halves
+                __m256d ev = _mm256_permute2f128_pd(v0, v1, 0x20);
+                __m256d od = _mm256_permute2f128_pd(v0, v1, 0x31);
+                _mm256_storeu_pd(ep + i * 2, ev);
+                _mm256_storeu_pd(op + i * 2, od);
+            }
+            for (; i < N / 2; ++i) {
+                even[i] = x[2 * i];
+                odd[i]  = x[2 * i + 1];
+            }
         }
 
         codelet_fixed_core<N / 2>(even.data(), inverse);
         codelet_fixed_core<N / 2>(odd.data(), inverse);
 
         const auto& tw = inverse ? fixed_twiddles<N, true>() : fixed_twiddles<N, false>();
-        for (std::size_t k = 0; k < N / 2; ++k) {
-            const std::complex<double> t = odd[k] * tw[k];
-            x[k] = even[k] + t;
-            x[k + (N / 2)] = even[k] - t;
+
+        // AVX2 butterfly combine: x[k] = even[k] + odd[k]*tw[k]
+        {
+            const double* ep  = reinterpret_cast<const double*>(even.data());
+            const double* op  = reinterpret_cast<const double*>(odd.data());
+            const double* tp  = reinterpret_cast<const double*>(tw.data());
+            double* xlo = reinterpret_cast<double*>(x);
+            double* xhi = reinterpret_cast<double*>(x + N / 2);
+            constexpr std::size_t half = N / 2;
+            std::size_t k = 0;
+            for (; k + 1 < half; k += 2) {
+                __m256d e  = _mm256_loadu_pd(ep + k * 2);
+                __m256d o  = _mm256_loadu_pd(op + k * 2);
+                __m256d tw2 = _mm256_loadu_pd(tp + k * 2);
+                __m256d t  = cmul_pd_local(o, tw2);
+                _mm256_storeu_pd(xlo + k * 2, _mm256_add_pd(e, t));
+                _mm256_storeu_pd(xhi + k * 2, _mm256_sub_pd(e, t));
+            }
+            for (; k < half; ++k) {
+                const std::complex<double> t = odd[k] * tw[k];
+                x[k]          = even[k] + t;
+                x[k + half]   = even[k] - t;
+            }
         }
     }
 }
@@ -262,8 +310,8 @@ void codelet_8(double* __restrict__ d, bool inverse) noexcept {
     auto* x = reinterpret_cast<std::complex<double>*>(d);
     std::array<std::complex<double>, 4> even{x[0], x[2], x[4], x[6]};
     std::array<std::complex<double>, 4> odd{x[1], x[3], x[5], x[7]};
-    fft4_core(even.data(), inverse);
-    fft4_core(odd.data(), inverse);
+    fft4_core(even.data(), !inverse);
+    fft4_core(odd.data(), !inverse);
 
     const double imag_sign = inverse ? 1.0 : -1.0;
     const std::array<std::complex<double>, 4> tw{
@@ -293,8 +341,8 @@ void codelet_16(double* __restrict__ d, bool inverse) noexcept {
         odd[i] = x[2 * i + 1];
     }
 
-    codelet_8(reinterpret_cast<double*>(even.data()), false);
-    codelet_8(reinterpret_cast<double*>(odd.data()), false);
+    codelet_8(reinterpret_cast<double*>(even.data()), inverse);
+    codelet_8(reinterpret_cast<double*>(odd.data()), inverse);
     if (inverse) {
         for (auto& v : even) v *= 8.0;
         for (auto& v : odd) v *= 8.0;
@@ -341,6 +389,56 @@ void codelet_256(double* __restrict__ d, bool inverse) noexcept {
 
 void codelet_512(double* __restrict__ d, bool inverse) noexcept {
     codelet_fixed<512>(d, inverse);
+}
+
+void codelet_1024(double* __restrict__ d, bool inverse) noexcept {
+    using cd = std::complex<double>;
+    auto* x = reinterpret_cast<cd*>(d);
+
+    // Thread-local workspace avoids 2×8 KB top-level stack allocation
+    // (safe: codelet_fixed_core does not call back into codelet_1024)
+    static thread_local std::array<cd, 512> even_buf, odd_buf;
+
+    // SIMD deinterleave: even_buf[i] = x[2i], odd_buf[i] = x[2i+1]
+    {
+        const double* xp = reinterpret_cast<const double*>(x);
+        double* ep = reinterpret_cast<double*>(even_buf.data());
+        double* op = reinterpret_cast<double*>(odd_buf.data());
+        for (std::size_t i = 0; i < 512; i += 2) {
+            __m256d v0 = _mm256_loadu_pd(xp + i * 4);
+            __m256d v1 = _mm256_loadu_pd(xp + i * 4 + 4);
+            _mm256_storeu_pd(ep + i * 2, _mm256_permute2f128_pd(v0, v1, 0x20));
+            _mm256_storeu_pd(op + i * 2, _mm256_permute2f128_pd(v0, v1, 0x31));
+        }
+    }
+
+    codelet_fixed_core<512>(even_buf.data(), inverse);
+    codelet_fixed_core<512>(odd_buf.data(), inverse);
+
+    // SIMD butterfly combine using precomputed twiddles
+    const auto& tw = inverse ? fixed_twiddles<1024, true>() : fixed_twiddles<1024, false>();
+    {
+        const double* ep  = reinterpret_cast<const double*>(even_buf.data());
+        const double* op  = reinterpret_cast<const double*>(odd_buf.data());
+        const double* tp  = reinterpret_cast<const double*>(tw.data());
+        double* xlo = reinterpret_cast<double*>(x);
+        double* xhi = reinterpret_cast<double*>(x + 512);
+        for (std::size_t k = 0; k < 512; k += 2) {
+            __m256d e   = _mm256_loadu_pd(ep + k * 2);
+            __m256d o   = _mm256_loadu_pd(op + k * 2);
+            __m256d tw2 = _mm256_loadu_pd(tp + k * 2);
+            __m256d t   = cmul_pd_local(o, tw2);
+            _mm256_storeu_pd(xlo + k * 2, _mm256_add_pd(e, t));
+            _mm256_storeu_pd(xhi + k * 2, _mm256_sub_pd(e, t));
+        }
+    }
+
+    if (inverse) {
+        const __m256d s = _mm256_set1_pd(1.0 / 1024.0);
+        double* xp = d;
+        for (std::size_t i = 0; i < 1024; i += 2, xp += 4)
+            _mm256_storeu_pd(xp, _mm256_mul_pd(_mm256_loadu_pd(xp), s));
+    }
 }
 
 void smooth_100(double* __restrict__ d, bool inverse) noexcept {

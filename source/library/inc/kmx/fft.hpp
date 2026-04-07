@@ -83,3 +83,5 @@ private:
 };
 
 } // namespace kmx::fft
+
+#include <kmx/fft_router.hpp>

@@ -893,3 +893,40 @@ namespace kmx::fft
         }
     }
 }
+
+#ifdef KMX_FFT_ENABLE_AVX2
+#include <kmx/fft_backend/avx2.hpp>
+
+TEST_CASE("fft_avx2_1d_forward_inverse_identity", "[fft][avx2][d1]")
+{
+    using complex_d = std::complex<double>;
+    using namespace kmx::tensor;
+    using namespace kmx::fft::test_helpers;
+    const double tolerance = std::numeric_limits<double>::epsilon() * 10000.0;
+
+    kmx::fft::engine<complex_d, kmx::fft::backend::avx2<complex_d>> engine;
+
+    const std::vector<std::size_t> test_sizes = {2u, 4u, 8u, 16u, 32u, 64u, 128u, 256u, 512u, 1024u, 100u, 1000u};
+
+    for (const std::size_t n : test_sizes)
+    {
+        DYNAMIC_SECTION("avx2_size_n_" << n)
+        {
+            std::vector<complex_d> signal(n), result(n), reconstructed(n);
+            fill_random(signal, static_cast<unsigned int>(n));
+            const std::vector<complex_d> original = signal;
+
+            view<const complex_d> sig_view(signal);
+            view<complex_d> res_view(result);
+            view<complex_d> rec_view(reconstructed);
+            view<const complex_d> res_const_view(result);
+
+            REQUIRE_NOTHROW(engine.transform_1d(sig_view, res_view, false));
+            REQUIRE_NOTHROW(engine.transform_1d(res_const_view, rec_view, true));
+
+            view<const complex_d> orig_view(original);
+            REQUIRE_THAT(rec_view, is_tensor_close(orig_view, tolerance));
+        }
+    }
+}
+#endif

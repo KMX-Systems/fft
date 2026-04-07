@@ -20,8 +20,19 @@
 #include <omp.h>
 #endif
 
-// Select Engine based on macros
-#if defined(KMX_FFT_ENABLE_AVX2)
+#if defined(KMX_FFT_USE_DYNAMIC_ENGINE)
+template <typename Plan>
+const char* plan_strategy(const Plan& plan) { return kmx::fft::backend::to_string(plan.routed_id); }
+#else
+template <typename Plan>
+const char* plan_strategy(const Plan&) { return "avx2"; }
+#endif
+
+#if defined(KMX_FFT_USE_DYNAMIC_ENGINE)
+template <typename T>
+using tested_engine = kmx::fft::dynamic_engine<std::complex<T>>;
+#define KMX_FFT_ENGINE_NAME "Dynamic Engine"
+#elif defined(KMX_FFT_ENABLE_AVX2)
 #include <kmx/fft_backend/avx2.hpp>
 template <typename T>
 using tested_engine = kmx::fft::engine<std::complex<T>, kmx::fft::backend::avx2<std::complex<T>>>;
@@ -253,8 +264,8 @@ void compare_1d_double(const std::size_t n, const int reps)
         plan.execute(v);
     }, reps);
 
-    std::printf("1D double  N=%-6zu  fftw/MEASURE=%7.1f µs  kmx=%7.1f µs  kmx/plan=%7.1f µs  ratio(plan/MEASURE)=%5.1fx\n",
-                n, fftw_meas_us, kmx_us, kmx_plan_us, kmx_plan_us / fftw_meas_us);
+    std::printf("1D double  N=%-6zu  fftw/MEASURE=%7.1f µs  kmx=%7.1f µs  kmx/plan=%7.1f µs [%-8s] ratio(plan/MEASURE)=%5.1fx\n",
+                n, fftw_meas_us, kmx_us, kmx_plan_us, plan_strategy(plan), kmx_plan_us / fftw_meas_us);
     return;
 #endif
 
@@ -307,8 +318,8 @@ void compare_1d_float(const std::size_t n, const int reps)
         plan.execute(v);
     }, reps);
 
-    std::printf("1D float   N=%-6zu  fftw/MEASURE=%7.1f µs  kmx=%7.1f µs  kmx/plan=%7.1f µs  ratio(plan/MEASURE)=%5.1fx\n",
-                n, fftw_meas_us, kmx_us, kmx_plan_us, kmx_plan_us / fftw_meas_us);
+    std::printf("1D float   N=%-6zu  fftw/MEASURE=%7.1f µs  kmx=%7.1f µs  kmx/plan=%7.1f µs [%-8s] ratio(plan/MEASURE)=%5.1fx\n",
+                n, fftw_meas_us, kmx_us, kmx_plan_us, plan_strategy(plan), kmx_plan_us / fftw_meas_us);
     return;
 #endif
 
@@ -365,8 +376,8 @@ void compare_2d_double(const std::size_t rows, const std::size_t cols, const int
         plan.execute(v);
     }, reps);
 
-    std::printf("2D double  %zux%-6zu  fftw/MEASURE=%7.1f µs  kmx=%7.1f µs  kmx/plan=%7.1f µs  ratio(plan/MEASURE)=%5.1fx\n",
-                rows, cols, fftw_meas_us, kmx_us, kmx_plan_us, kmx_plan_us / fftw_meas_us);
+    std::printf("2D double  %zux%-6zu  fftw/MEASURE=%7.1f µs  kmx=%7.1f µs  kmx/plan=%7.1f µs [%-8s] ratio(plan/MEASURE)=%5.1fx\n",
+                rows, cols, fftw_meas_us, kmx_us, kmx_plan_us, plan_strategy(plan), kmx_plan_us / fftw_meas_us);
     return;
 #endif
 
@@ -413,7 +424,7 @@ int main(int argc, char** argv)
         compare_1d_float(n, options.reps);
 
     std::printf("\n=== 2-D double ===\n");
-    for (const auto [r, c] : std::array<std::pair<std::size_t,std::size_t>, 7>{{{32,32},{64,64},{128,128},{128,256},{256,128},{256,256},{512,512}}})
+    for (const auto [r, c] : std::array<std::pair<std::size_t,std::size_t>, 9>{{{32,32},{64,64},{128,128},{128,256},{256,128},{256,256},{512,512},{1024,1024},{2048,2048}}})
         compare_2d_double(r, c, options.reps);
 
     return 0;

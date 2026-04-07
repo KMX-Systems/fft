@@ -139,6 +139,7 @@ void codelet_64(double* d, bool inverse) noexcept;
 void codelet_128(double* d, bool inverse) noexcept;
 void codelet_256(double* d, bool inverse) noexcept;
 void codelet_512(double* d, bool inverse) noexcept;
+void codelet_1024(double* d, bool inverse) noexcept;
 void smooth_100(double* d, bool inverse) noexcept;
 void smooth_1000(double* d, bool inverse) noexcept;
 void smooth_1500(double* d, bool inverse) noexcept;
@@ -743,6 +744,7 @@ private:
             if (n == 128) { avx2_detail::codelet_128(reinterpret_cast<double*>(raw), inverse); return; }
             if (n == 256) { avx2_detail::codelet_256(reinterpret_cast<double*>(raw), inverse); return; }
             if (n == 512) { avx2_detail::codelet_512(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 1024) { avx2_detail::codelet_1024(reinterpret_cast<double*>(raw), inverse); return; }
         }
 
         _ComplexNumber* a = raw;
