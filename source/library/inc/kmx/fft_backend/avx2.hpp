@@ -1,97 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // Copyright (c) 2026 - present KMX Systems. All rights reserved.
 /// @file avx2.hpp
 /// @brief AVX2 + FMA + OpenMP accelerated FFT backend for kmx::fft.
@@ -146,7 +52,7 @@ void smooth_1000(double* d, bool inverse) noexcept;
 void smooth_1500(double* d, bool inverse) noexcept;
 }
 
-// ─── 32-byte aligned allocator ────────────────────────────────────────────────
+// 32-byte aligned allocator
 template <typename T>
 struct aligned32_allocator {
     using value_type = T;
@@ -186,7 +92,7 @@ private:
     // Tile width for 2D column pass (number of columns processed together)
     static constexpr std::size_t kColTile = 8;
 
-    // ─── FMA complex multiply ─────────────────────────────────────────────────
+    // FMA complex multiply
     [[nodiscard]] static __m256d cmul_pd(__m256d a, __m256d b) noexcept {
         __m256d a_re   = _mm256_unpacklo_pd(a, a);
         __m256d a_im   = _mm256_unpackhi_pd(a, a);
@@ -200,7 +106,7 @@ private:
         return _mm256_fmaddsub_ps(a_re, b, _mm256_mul_ps(a_im, b_shuf));
     }
 
-    // ─── Pre-packed twiddle table ─────────────────────────────────────────────
+    // Pre-packed twiddle table
     // For each stage s (where stage_len = 1<<s), we pack twiddles contiguously
     // in the order they are accessed: tw_packed[s][k] = W^(k * (n >> (s+1)))
     // This eliminates all strided loads from the hot butterfly loops.
@@ -515,7 +421,7 @@ private:
         }
     } plan_2d_cache_;
 
-    // ─── Stockham stage with pre-packed contiguous twiddles ───────────────────
+    // Stockham stage with pre-packed contiguous twiddles
     // stage_idx = log2(stage_len); pt.stages[stage_idx] is contiguous [0..half_len-1]
     static void stockham_stage_packed_pd(const _ComplexNumber* __restrict__ src,
                                                _ComplexNumber* __restrict__ dst,
@@ -592,7 +498,7 @@ private:
         }
     }
 
-    // ─── Radix-4 stage (double, in-place, packed twiddles) ───────────────────
+    // Radix-4 stage (double, in-place, packed twiddles)
     static void radix4_stage_packed_pd(_ComplexNumber* data, std::size_t n,
                                         int stage_idx,   // stage_idx for a *quarter-len* pass
                                         const packed_twiddles& pt) noexcept {
@@ -710,7 +616,7 @@ private:
         }
     }
 
-    // ─── Core Stockham (double) using pre-packed twiddles ────────────────────
+    // Core Stockham (double) using pre-packed twiddles
     static void scale_inplace(_ComplexNumber* data, std::size_t n, value_type scale) noexcept {
         if constexpr (is_complex_double) {
             const __m256d s4 = _mm256_set1_pd(double(scale));
@@ -956,7 +862,7 @@ private:
         }
     }
 
-    // ─── Six-step (double) ────────────────────────────────────────────────────
+    // Six-step (double)
     void six_step_double_raw_impl(_ComplexNumber* data, std::size_t n,
                                   aligned_vec& scratch, bool inverse,
                                   const aligned_vec& tw_n,
@@ -1013,7 +919,7 @@ private:
         six_step_double_raw(data.data(), data.size(), work_buf_, inverse);
     }
 
-    // ─── Top-level dispatch ───────────────────────────────────────────────────
+    // Top-level dispatch
     void run_avx2(aligned_vec& buf, const packed_twiddles& pt, bool inverse) {
         if (buf.size() >= kSixStepThresh && is_complex_double)
             six_step_double(buf, inverse);
@@ -1021,7 +927,7 @@ private:
             execute_pow2_raw(buf.data(), buf.size(), work_buf_, pt, inverse);
     }
 
-    // ─── Bluestein via AVX2 inner FFT ────────────────────────────────────────
+    // Bluestein via AVX2 inner FFT
     // Non-power-of-2 sizes: pads to M (next pow-2 ≥ 2N-1), runs AVX2 for the
     // inner power-of-2 FFTs rather than falling to the software backend.
     static void bluestein_execute(tensor::view<_ComplexNumber> v,
@@ -1063,7 +969,7 @@ private:
     }
 
 public:
-    // ─── Plan object ─────────────────────────────────────────────────────────
+    // Plan object
     // A plan pre-computes all twiddles and pre-allocates the work buffer.
     // plan::execute() is the zero-allocation hot path.
     struct plan {
@@ -1336,7 +1242,7 @@ public:
         return plan_2d{this, rows, cols, inverse};
     }
 
-    // ─── Standard transform_1d / transform_2d ────────────────────────────────
+    // Standard transform_1d / transform_2d
     immediate_awaitable transform_1d(tensor::view<_ComplexNumber> v_inout, bool inverse) {
         const std::size_t n = v_inout.size();
         if (!std::has_single_bit(n)) {
@@ -1377,7 +1283,7 @@ public:
         return transform_1d(v_out, inverse);
     }
 
-    // ─── 2D transform ────────────────────────────────────────────────────────
+    // 2D transform
     immediate_awaitable transform_2d(tensor::view<_ComplexNumber> v_inout, bool inverse) {
         if (v_inout.rank() == 1u) return transform_1d(v_inout, inverse);
         if (v_inout.rank() != 2u) [[unlikely]]
@@ -1406,7 +1312,7 @@ public:
         const packed_twiddles* ptC = col_pow2 ? &ptw_cache_.get(cols, inverse) : nullptr;
         const packed_twiddles* ptR = row_pow2 ? &ptw_cache_.get(rows, inverse) : nullptr;
 
-        // ── Small / sequential path: pre-allocate scratch once, zero per-row alloc ──
+        // Small / sequential path: pre-allocate scratch once, zero per-row alloc
         if (total < kParallelThresh && !prefer_small_2d_avx2(rows, cols)) {
             // Pre-size work_buf_ to cover both row and column transforms.
             // All subsequent work.resize(n) calls inside run_stockham_double will be
@@ -1451,7 +1357,7 @@ public:
             return immediate_awaitable{};
         }
 
-        // ── Large / parallel path: tiled column pass with OpenMP ─────────────────
+        // Large / parallel path: tiled column pass with OpenMP
         // Row passes
 #pragma omp parallel
         {
