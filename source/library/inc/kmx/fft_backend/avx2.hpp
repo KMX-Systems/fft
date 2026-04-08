@@ -140,6 +140,7 @@ void codelet_128(double* d, bool inverse) noexcept;
 void codelet_256(double* d, bool inverse) noexcept;
 void codelet_512(double* d, bool inverse) noexcept;
 void codelet_1024(double* d, bool inverse) noexcept;
+void prime_small_kernel_selector(std::size_t n, bool inverse) noexcept;
 void smooth_100(double* d, bool inverse) noexcept;
 void smooth_1000(double* d, bool inverse) noexcept;
 void smooth_1500(double* d, bool inverse) noexcept;
@@ -179,7 +180,7 @@ private:
     // Parallelise stages when total transform size exceeds this
     static constexpr std::size_t kParallelThresh = 16384;
     // Use six-step above this size
-    static constexpr std::size_t kSixStepThresh  = 32768;
+    static constexpr std::size_t kSixStepThresh  = 16384;
     // For smaller 2D sizes the software backend still wins on overhead.
     static constexpr std::size_t k2DAvx2Thresh = 16384;
     // Tile width for 2D column pass (number of columns processed together)
@@ -783,6 +784,18 @@ private:
                                  const packed_twiddles& pt,
                                  bool inverse) noexcept {
         if (n <= 1) return;
+        if constexpr (is_complex_double) {
+            if (n == 2u) { avx2_detail::codelet_2(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 4u) { avx2_detail::codelet_4(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 8u) { avx2_detail::codelet_8(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 16u) { avx2_detail::codelet_16(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 32u) { avx2_detail::codelet_32(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 64u) { avx2_detail::codelet_64(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 128u) { avx2_detail::codelet_128(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 256u) { avx2_detail::codelet_256(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 512u) { avx2_detail::codelet_512(reinterpret_cast<double*>(raw), inverse); return; }
+            if (n == 1024u) { avx2_detail::codelet_1024(reinterpret_cast<double*>(raw), inverse); return; }
+        }
         work.resize(n);
         execute_pow2_presized(raw, n, work.data(), pt, inverse);
     }
@@ -1054,11 +1067,26 @@ public:
     // A plan pre-computes all twiddles and pre-allocates the work buffer.
     // plan::execute() is the zero-allocation hot path.
     struct plan {
+        enum class pinned_pow2_codelet : std::uint8_t {
+            none,
+            n2,
+            n4,
+            n8,
+            n16,
+            n32,
+            n64,
+            n128,
+            n256,
+            n512,
+            n1024,
+        };
+
         avx2*          engine_;
         std::size_t    n_;
         bool           inverse_;
         bool           is_pow2_;
         bool           use_six_step_;
+        pinned_pow2_codelet pinned_codelet_ = pinned_pow2_codelet::none;
         const packed_twiddles* pt_ = nullptr;
         const packed_twiddles* pt_bluestein_fwd_ = nullptr;
         const packed_twiddles* pt_bluestein_inv_ = nullptr;
@@ -1078,6 +1106,23 @@ public:
         {
             if (is_pow2_) {
                 pt_ = &eng->ptw_cache_.get(n, inv);
+                if constexpr (is_complex_double)
+                    avx2_detail::prime_small_kernel_selector(n, inv);
+                if constexpr (is_complex_double) {
+                    switch (n) {
+                    case 2u: pinned_codelet_ = pinned_pow2_codelet::n2; break;
+                    case 4u: pinned_codelet_ = pinned_pow2_codelet::n4; break;
+                    case 8u: pinned_codelet_ = pinned_pow2_codelet::n8; break;
+                    case 16u: pinned_codelet_ = pinned_pow2_codelet::n16; break;
+                    case 32u: pinned_codelet_ = pinned_pow2_codelet::n32; break;
+                    case 64u: pinned_codelet_ = pinned_pow2_codelet::n64; break;
+                    case 128u: pinned_codelet_ = pinned_pow2_codelet::n128; break;
+                    case 256u: pinned_codelet_ = pinned_pow2_codelet::n256; break;
+                    case 512u: pinned_codelet_ = pinned_pow2_codelet::n512; break;
+                    case 1024u: pinned_codelet_ = pinned_pow2_codelet::n1024; break;
+                    default: break;
+                    }
+                }
                 work_.resize(n);
                 if (use_six_step_) {
                     const int half_log = std::countr_zero(n) / 2;
@@ -1118,6 +1163,19 @@ public:
                     if (use_six_step_) {
                         engine_->six_step_double_raw_impl(data, n_, work, inverse_, *full_tw_, *pt_cols_, *pt_rows_);
                         return;
+                    }
+                    switch (pinned_codelet_) {
+                    case pinned_pow2_codelet::n2: avx2_detail::codelet_2(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n4: avx2_detail::codelet_4(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n8: avx2_detail::codelet_8(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n16: avx2_detail::codelet_16(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n32: avx2_detail::codelet_32(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n64: avx2_detail::codelet_64(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n128: avx2_detail::codelet_128(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n256: avx2_detail::codelet_256(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n512: avx2_detail::codelet_512(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::n1024: avx2_detail::codelet_1024(reinterpret_cast<double*>(data), inverse_); return;
+                    case pinned_pow2_codelet::none: break;
                     }
                 }
                 engine_->execute_pow2_presized(data, n_, work.data(), *pt_, inverse_);

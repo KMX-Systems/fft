@@ -1,7 +1,9 @@
 // Copyright (c) 2026 - present KMX Systems. All rights reserved.
 
 #include <array>
+#include <chrono>
 #include <complex>
+#include <cstdint>
 #include <immintrin.h>
 #include <numbers>
 #include <span>
@@ -47,7 +49,7 @@ void fft4_core(std::complex<double>* x, bool inverse) noexcept {
 
 template <std::size_t N, bool Inverse>
 [[nodiscard]] const std::array<std::complex<double>, N / 2>& fixed_twiddles() noexcept {
-    static const std::array<std::complex<double>, N / 2> table = [] {
+    alignas(32) static const std::array<std::complex<double>, N / 2> table = [] {
         std::array<std::complex<double>, N / 2> out{};
         constexpr double sign = Inverse ? 1.0 : -1.0;
         constexpr double two_pi = 2.0 * std::numbers::pi_v<double>;
@@ -62,7 +64,7 @@ template <std::size_t N, bool Inverse>
 
 template <std::size_t N, bool Inverse>
 [[nodiscard]] const std::array<std::complex<double>, N>& full_twiddles() noexcept {
-    static const std::array<std::complex<double>, N> table = [] {
+    alignas(32) static const std::array<std::complex<double>, N> table = [] {
         std::array<std::complex<double>, N> out{};
         constexpr double sign = Inverse ? 1.0 : -1.0;
         constexpr double two_pi = 2.0 * std::numbers::pi_v<double>;
@@ -85,8 +87,10 @@ void codelet_fixed_core(std::complex<double>* x, bool inverse) noexcept {
     } else if constexpr (N == 4) {
         fft4_core(x, !inverse);
     } else {
-        std::array<std::complex<double>, N / 2> even{};
-        std::array<std::complex<double>, N / 2> odd{};
+        // Reuse per-thread temporary buffers to avoid recursive stack allocation
+        // and per-call zero-initialization overhead in hot fixed-size paths.
+        alignas(32) static thread_local std::array<std::complex<double>, N / 2> even;
+        alignas(32) static thread_local std::array<std::complex<double>, N / 2> odd;
 
         // AVX2 deinterleave: even[i] = x[2i], odd[i] = x[2i+1]
         // Process 2 complex-double pairs at a time (4 complex doubles = 8 doubles = 2 AVX2 loads)
@@ -103,8 +107,8 @@ void codelet_fixed_core(std::complex<double>* x, bool inverse) noexcept {
                 // Deinterleave: even = low 128-bit halves of v0, v1; odd = high halves
                 __m256d ev = _mm256_permute2f128_pd(v0, v1, 0x20);
                 __m256d od = _mm256_permute2f128_pd(v0, v1, 0x31);
-                _mm256_storeu_pd(ep + i * 2, ev);
-                _mm256_storeu_pd(op + i * 2, od);
+                _mm256_store_pd(ep + i * 2, ev);
+                _mm256_store_pd(op + i * 2, od);
             }
             for (; i < N / 2; ++i) {
                 even[i] = x[2 * i];
@@ -127,9 +131,9 @@ void codelet_fixed_core(std::complex<double>* x, bool inverse) noexcept {
             constexpr std::size_t half = N / 2;
             std::size_t k = 0;
             for (; k + 1 < half; k += 2) {
-                __m256d e  = _mm256_loadu_pd(ep + k * 2);
-                __m256d o  = _mm256_loadu_pd(op + k * 2);
-                __m256d tw2 = _mm256_loadu_pd(tp + k * 2);
+                __m256d e  = _mm256_load_pd(ep + k * 2);
+                __m256d o  = _mm256_load_pd(op + k * 2);
+                __m256d tw2 = _mm256_load_pd(tp + k * 2);
                 __m256d t  = cmul_pd_local(o, tw2);
                 _mm256_storeu_pd(xlo + k * 2, _mm256_add_pd(e, t));
                 _mm256_storeu_pd(xhi + k * 2, _mm256_sub_pd(e, t));
@@ -151,6 +155,129 @@ void codelet_fixed(double* __restrict__ d, bool inverse) noexcept {
         const double scale = 1.0 / static_cast<double>(N);
         for (auto& v : std::span<std::complex<double>>(x, N)) v *= scale;
     }
+}
+
+enum class small_kernel_variant : std::uint8_t {
+    fixed,
+    generated,
+};
+
+template <std::size_t Bits>
+[[nodiscard]] constexpr std::size_t reverse_bits(std::size_t v) noexcept {
+    std::size_t out = 0;
+    for (std::size_t i = 0; i < Bits; ++i) {
+        out = (out << 1u) | (v & 1u);
+        v >>= 1u;
+    }
+    return out;
+}
+
+template <std::size_t N, std::size_t Len>
+void generated_pow2_stage_chain(std::complex<double>* x, bool inverse) noexcept {
+    constexpr std::size_t half = Len / 2u;
+    const auto& tw = inverse ? fixed_twiddles<Len, true>() : fixed_twiddles<Len, false>();
+
+    for (std::size_t base = 0; base < N; base += Len) {
+        std::size_t k = 0;
+        for (; k + 1u < half; k += 2u) {
+            __m256d u = _mm256_loadu_pd(reinterpret_cast<const double*>(x + base + k));
+            __m256d v = _mm256_loadu_pd(reinterpret_cast<const double*>(x + base + half + k));
+            __m256d w = _mm256_load_pd(reinterpret_cast<const double*>(tw.data() + k));
+            __m256d t = cmul_pd_local(v, w);
+            _mm256_storeu_pd(reinterpret_cast<double*>(x + base + k), _mm256_add_pd(u, t));
+            _mm256_storeu_pd(reinterpret_cast<double*>(x + base + half + k), _mm256_sub_pd(u, t));
+        }
+        for (; k < half; ++k) {
+            const std::complex<double> t = x[base + half + k] * tw[k];
+            const std::complex<double> u = x[base + k];
+            x[base + k] = u + t;
+            x[base + half + k] = u - t;
+        }
+    }
+
+    if constexpr (Len < N)
+        generated_pow2_stage_chain<N, Len * 2u>(x, inverse);
+}
+
+template <std::size_t N>
+void codelet_generated_pow2(double* __restrict__ d, bool inverse) noexcept {
+    using cd = std::complex<double>;
+    auto* x = reinterpret_cast<cd*>(d);
+    constexpr std::size_t bits = std::countr_zero(N);
+
+    for (std::size_t i = 0; i < N; ++i) {
+        const std::size_t j = reverse_bits<bits>(i);
+        if (j > i)
+            std::swap(x[i], x[j]);
+    }
+
+    generated_pow2_stage_chain<N, 2u>(x, inverse);
+
+    if (inverse) {
+        const double scale = 1.0 / static_cast<double>(N);
+        for (auto& v : std::span<cd>(x, N))
+            v *= scale;
+    }
+}
+
+template <std::size_t N>
+using kernel_fn = void (*)(double*, bool) noexcept;
+
+template <std::size_t N>
+void codelet_fixed_kernel(double* __restrict__ d, bool inverse) noexcept {
+    codelet_fixed<N>(d, inverse);
+}
+
+template <std::size_t N>
+void codelet_generated_kernel(double* __restrict__ d, bool inverse) noexcept {
+    codelet_generated_pow2<N>(d, inverse);
+}
+
+template <std::size_t N, bool Inverse>
+[[nodiscard]] small_kernel_variant selected_small_kernel_variant() noexcept {
+    static const small_kernel_variant variant = [] {
+        using cd = std::complex<double>;
+        constexpr int warmup_iters = 16;
+        constexpr int bench_iters = 192;
+
+        alignas(32) std::array<cd, N> seed{};
+        for (std::size_t i = 0; i < N; ++i) {
+            const double a = static_cast<double>((i * 13u + 7u) % 257u) * (1.0 / 257.0);
+            seed[i] = {std::cos(a), std::sin(2.0 * a)};
+        }
+
+        auto bench = [&seed](kernel_fn<N> fn) -> std::uint64_t {
+            alignas(32) std::array<cd, N> work{};
+            for (int i = 0; i < warmup_iters; ++i) {
+                work = seed;
+                fn(reinterpret_cast<double*>(work.data()), Inverse);
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < bench_iters; ++i) {
+                work = seed;
+                fn(reinterpret_cast<double*>(work.data()), Inverse);
+            }
+            const auto t1 = std::chrono::steady_clock::now();
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        };
+
+        const std::uint64_t fixed_ns = bench(&codelet_fixed_kernel<N>);
+        const std::uint64_t generated_ns = bench(&codelet_generated_kernel<N>);
+        return generated_ns < fixed_ns ? small_kernel_variant::generated : small_kernel_variant::fixed;
+    }();
+    return variant;
+}
+
+template <std::size_t N>
+[[nodiscard]] small_kernel_variant selected_small_kernel_variant(bool inverse) noexcept {
+    return inverse ? selected_small_kernel_variant<N, true>() : selected_small_kernel_variant<N, false>();
+}
+
+template <std::size_t N>
+void dispatch_small_kernel(double* __restrict__ d, bool inverse) noexcept {
+    (void)inverse;
+    codelet_fixed_kernel<N>(d, inverse);
 }
 
 void codelet_3_impl(std::complex<double>* x, bool inverse) noexcept {
@@ -204,7 +331,7 @@ void smooth_fixed_core(std::complex<double>* x, bool inverse) noexcept {
         constexpr std::size_t M = N / radix;
         // Reuse per-thread scratch to avoid repeated large stack allocation/zero-fill
         // in special smooth kernels (notably N=1000 and N=1500).
-        static thread_local std::array<std::complex<double>, N> scratch;
+        alignas(32) static thread_local std::array<std::complex<double>, N> scratch;
 
         if constexpr (radix == 2u) {
             for (std::size_t q = 0; q < M; ++q) {
@@ -394,19 +521,19 @@ void codelet_16(double* __restrict__ d, bool inverse) noexcept {
 }
 
 void codelet_32(double* __restrict__ d, bool inverse) noexcept {
-    codelet_fixed<32>(d, inverse);
+    dispatch_small_kernel<32>(d, inverse);
 }
 
 void codelet_64(double* __restrict__ d, bool inverse) noexcept {
-    codelet_fixed<64>(d, inverse);
+    dispatch_small_kernel<64>(d, inverse);
 }
 
 void codelet_128(double* __restrict__ d, bool inverse) noexcept {
-    codelet_fixed<128>(d, inverse);
+    dispatch_small_kernel<128>(d, inverse);
 }
 
 void codelet_256(double* __restrict__ d, bool inverse) noexcept {
-    codelet_fixed<256>(d, inverse);
+    dispatch_small_kernel<256>(d, inverse);
 }
 
 void codelet_512(double* __restrict__ d, bool inverse) noexcept {
@@ -419,7 +546,7 @@ void codelet_1024(double* __restrict__ d, bool inverse) noexcept {
 
     // Thread-local workspace avoids 2×8 KB top-level stack allocation
     // (safe: codelet_fixed_core does not call back into codelet_1024)
-    static thread_local std::array<cd, 512> even_buf, odd_buf;
+    alignas(32) static thread_local std::array<cd, 512> even_buf, odd_buf;
 
     // SIMD deinterleave: even_buf[i] = x[2i], odd_buf[i] = x[2i+1]
     {
@@ -429,8 +556,8 @@ void codelet_1024(double* __restrict__ d, bool inverse) noexcept {
         for (std::size_t i = 0; i < 512; i += 2) {
             __m256d v0 = _mm256_loadu_pd(xp + i * 4);
             __m256d v1 = _mm256_loadu_pd(xp + i * 4 + 4);
-            _mm256_storeu_pd(ep + i * 2, _mm256_permute2f128_pd(v0, v1, 0x20));
-            _mm256_storeu_pd(op + i * 2, _mm256_permute2f128_pd(v0, v1, 0x31));
+            _mm256_store_pd(ep + i * 2, _mm256_permute2f128_pd(v0, v1, 0x20));
+            _mm256_store_pd(op + i * 2, _mm256_permute2f128_pd(v0, v1, 0x31));
         }
     }
 
@@ -446,9 +573,9 @@ void codelet_1024(double* __restrict__ d, bool inverse) noexcept {
         double* xlo = reinterpret_cast<double*>(x);
         double* xhi = reinterpret_cast<double*>(x + 512);
         for (std::size_t k = 0; k < 512; k += 2) {
-            __m256d e   = _mm256_loadu_pd(ep + k * 2);
-            __m256d o   = _mm256_loadu_pd(op + k * 2);
-            __m256d tw2 = _mm256_loadu_pd(tp + k * 2);
+            __m256d e   = _mm256_load_pd(ep + k * 2);
+            __m256d o   = _mm256_load_pd(op + k * 2);
+            __m256d tw2 = _mm256_load_pd(tp + k * 2);
             __m256d t   = cmul_pd_local(o, tw2);
             _mm256_storeu_pd(xlo + k * 2, _mm256_add_pd(e, t));
             _mm256_storeu_pd(xhi + k * 2, _mm256_sub_pd(e, t));
@@ -461,6 +588,11 @@ void codelet_1024(double* __restrict__ d, bool inverse) noexcept {
         for (std::size_t i = 0; i < 1024; i += 2, xp += 4)
             _mm256_storeu_pd(xp, _mm256_mul_pd(_mm256_loadu_pd(xp), s));
     }
+}
+
+void prime_small_kernel_selector(std::size_t n, bool inverse) noexcept {
+    (void)n;
+    (void)inverse;
 }
 
 void smooth_100(double* __restrict__ d, bool inverse) noexcept {
