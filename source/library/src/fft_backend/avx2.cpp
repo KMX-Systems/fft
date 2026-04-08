@@ -14,6 +14,14 @@ namespace {
 constexpr double kInvSqrt2 = 0.707106781186547524400844362104849039;
 constexpr double kCosPi8   = 0.923879532511286756128183189396788286;
 constexpr double kSinPi8   = 0.382683432365089771728459984030398867;
+constexpr double kCos2Pi5  = 0.309016994374947424102293417182819059;
+constexpr double kCos4Pi5  = -0.809016994374947424102293417182819059;
+constexpr double kSin2Pi5  = 0.951056516295153572116439333379382143;
+constexpr double kSin4Pi5  = 0.587785252292473129168705954639072769;
+
+[[nodiscard]] inline std::complex<double> imag_rot(const std::complex<double>& z, double imag_sign) noexcept {
+    return {-imag_sign * z.imag(), imag_sign * z.real()};
+}
 
 // FMA complex multiply for two complex doubles packed in one __m256d
 [[nodiscard]] inline __m256d cmul_pd_local(__m256d a, __m256d b) noexcept {
@@ -194,7 +202,9 @@ void smooth_fixed_core(std::complex<double>* x, bool inverse) noexcept {
     } else {
         constexpr std::size_t radix = (N % 5u) == 0u ? 5u : ((N % 3u) == 0u ? 3u : 2u);
         constexpr std::size_t M = N / radix;
-        std::array<std::complex<double>, N> scratch{};
+        // Reuse per-thread scratch to avoid repeated large stack allocation/zero-fill
+        // in special smooth kernels (notably N=1000 and N=1500).
+        static thread_local std::array<std::complex<double>, N> scratch;
 
         if constexpr (radix == 2u) {
             for (std::size_t q = 0; q < M; ++q) {
@@ -251,23 +261,35 @@ void smooth_fixed_core(std::complex<double>* x, bool inverse) noexcept {
                 x[q + 2u * M] = inverse ? y2 * inv_radix : y2;
             }
         } else {
-            const auto& tw_r = inverse ? full_twiddles<5, true>() : full_twiddles<5, false>();
             const auto* s0 = scratch.data();
             const auto* s1 = scratch.data() + M;
             const auto* s2 = scratch.data() + 2u * M;
             const auto* s3 = scratch.data() + 3u * M;
             const auto* s4 = scratch.data() + 4u * M;
+            const double imag_sign = inverse ? 1.0 : -1.0;
             for (std::size_t q = 0; q < M; ++q) {
                 const std::complex<double> v0 = s0[q];
                 const std::complex<double> v1 = s1[q] * tw_n[q];
                 const std::complex<double> v2 = s2[q] * tw_n[2u * q];
                 const std::complex<double> v3 = s3[q] * tw_n[3u * q];
                 const std::complex<double> v4 = s4[q] * tw_n[4u * q];
-                const std::complex<double> y0 = v0 + v1 + v2 + v3 + v4;
-                const std::complex<double> y1 = v0 + v1 * tw_r[1] + v2 * tw_r[2] + v3 * tw_r[3] + v4 * tw_r[4];
-                const std::complex<double> y2 = v0 + v1 * tw_r[2] + v2 * tw_r[4] + v3 * tw_r[1] + v4 * tw_r[3];
-                const std::complex<double> y3 = v0 + v1 * tw_r[3] + v2 * tw_r[1] + v3 * tw_r[4] + v4 * tw_r[2];
-                const std::complex<double> y4 = v0 + v1 * tw_r[4] + v2 * tw_r[3] + v3 * tw_r[2] + v4 * tw_r[1];
+                const std::complex<double> a14 = v1 + v4;
+                const std::complex<double> d14 = v1 - v4;
+                const std::complex<double> a23 = v2 + v3;
+                const std::complex<double> d23 = v2 - v3;
+
+                const std::complex<double> base14 = a14 * kCos2Pi5 + a23 * kCos4Pi5;
+                const std::complex<double> base23 = a14 * kCos4Pi5 + a23 * kCos2Pi5;
+                const std::complex<double> u1 = d14 * kSin2Pi5 + d23 * kSin4Pi5;
+                const std::complex<double> u2 = d14 * kSin4Pi5 - d23 * kSin2Pi5;
+                const std::complex<double> r1 = imag_rot(u1, imag_sign);
+                const std::complex<double> r2 = imag_rot(u2, imag_sign);
+
+                const std::complex<double> y0 = v0 + a14 + a23;
+                const std::complex<double> y1 = v0 + base14 + r1;
+                const std::complex<double> y2 = v0 + base23 + r2;
+                const std::complex<double> y3 = v0 + base23 - r2;
+                const std::complex<double> y4 = v0 + base14 - r1;
                 x[q] = inverse ? y0 * inv_radix : y0;
                 x[q + M] = inverse ? y1 * inv_radix : y1;
                 x[q + 2u * M] = inverse ? y2 * inv_radix : y2;
