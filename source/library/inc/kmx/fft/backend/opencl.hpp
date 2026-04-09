@@ -19,7 +19,6 @@
 #endif
 
 #include "software.hpp"
-#include "concepts.hpp"
 
 namespace kmx::fft::backend {
 

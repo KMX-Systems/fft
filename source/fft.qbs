@@ -1,7 +1,7 @@
 import qbs 1.0
 
 Project {
-    name: "fft-root"
+    name: "kmx-fft"
     property bool useAvx2: false
     property bool useCuda: false
     property bool useOpencl: false

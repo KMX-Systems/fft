@@ -10,7 +10,7 @@
     #include <concepts>
     #include <functional>
     #include <kmx/tensor.hpp>
-    #include <kmx/fft_backend/concepts.hpp>
+    #include <kmx/fft/backend/concepts.hpp>
     #include <memory>
     #include <mutex>
     #include <numbers>
@@ -76,6 +76,7 @@ namespace kmx::fft::backend // Nested namespace syntax
                     reversed_i = (reversed_i << 1u) | (temp_i & 1u);
                     temp_i >>= 1u;
                 }
+
                 if (reversed_i > i)
                     std::swap(raw[i], raw[reversed_i]);
             }

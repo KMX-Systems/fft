@@ -5,8 +5,8 @@
 #ifndef PCH
     #include <concepts>
     #include <kmx/tensor.hpp>
-    #include <kmx/fft_backend/concepts.hpp>
-    #include <kmx/fft_backend/software.hpp>
+    #include <kmx/fft/backend/concepts.hpp>
+    #include <kmx/fft/backend/software.hpp>
 #endif
 
 namespace kmx::fft
@@ -84,4 +84,4 @@ private:
 
 } // namespace kmx::fft
 
-#include <kmx/fft_router.hpp>
+#include <kmx/fft/router.hpp>

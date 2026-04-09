@@ -3,10 +3,10 @@ import qbs
 CppApplication {
     Depends
     {
-        name: 'fft-lib'
+        name: 'kmx-fft-lib'
     }
 
-    name: "fft-test"
+    name: "kmx-fft-test"
     consoleApplication: true
 
     files: [

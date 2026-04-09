@@ -12,7 +12,6 @@
 ///   - Tiled 2D column pass with explicit software prefetch
 ///   - AVX2 path used inside Bluestein for non-pow-2 sizes
 #pragma once
-
 #ifndef PCH
     #include <immintrin.h>
     #include <omp.h>

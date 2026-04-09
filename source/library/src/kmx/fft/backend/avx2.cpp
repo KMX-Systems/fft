@@ -8,7 +8,7 @@
 #include <numbers>
 #include <span>
 
-#include <kmx/fft_backend/avx2.hpp>
+#include <kmx/fft/backend/avx2.hpp>
 
 namespace kmx::fft::backend::avx2_detail {
 namespace {

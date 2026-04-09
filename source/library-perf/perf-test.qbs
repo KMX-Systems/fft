@@ -1,9 +1,9 @@
 import qbs
 
 CppApplication {
-    Depends { name: "fft-lib" }
+    Depends { name: "kmx-fft-lib" }
 
-    name: "fft-perf"
+    name: "kmx-fft-perf"
     consoleApplication: true
 
     cpp.cxxLanguageVersion: "c++26"

@@ -10,13 +10,13 @@ StaticLibrary {
         "inc_dep"
     ]
     install: true
-    name: "fft-lib"
+    name: "kmx-fft-lib"
     files: [
         "inc/kmx/fft.hpp",
-        "inc/kmx/fft_router.hpp",
-        "inc/kmx/fft_backend/concepts.hpp",
-        "inc/kmx/fft_backend/capabilities.hpp",
-        "inc/kmx/fft_backend/software.hpp",
+        "inc/kmx/fft/router.hpp",
+        "inc/kmx/fft/backend/capabilities.hpp",
+        "inc/kmx/fft/backend/concepts.hpp",
+        "inc/kmx/fft/backend/software.hpp",
         "inc/kmx/tensor.hpp",
     ]
 
@@ -45,21 +45,21 @@ StaticLibrary {
         name: "AVX2 Backend"
         condition: project.useAvx2
         files: [
-            "inc/kmx/fft_backend/avx2.hpp",
-            "src/fft_backend/avx2.cpp",
+            "inc/kmx/fft/backend/avx2.hpp",
+            "src/kmx/fft/backend/avx2.cpp",
         ]
     }
 
     Group {
         name: "OpenCL Backend"
         condition: project.useOpencl
-        files: ["inc/kmx/fft_backend/opencl.hpp"]
+        files: ["inc/kmx/fft/backend/opencl.hpp"]
     }
 
     Group {
         name: "CUDA Backend"
         condition: project.useCuda
-        files: ["inc/kmx/fft_backend/cuda.hpp"]
+        files: ["inc/kmx/fft/backend/cuda.hpp"]
     }
 
     Properties {

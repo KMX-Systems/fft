@@ -6,17 +6,17 @@
 #include <concepts>
 #include <optional>
 #include <kmx/tensor.hpp>
-#include <kmx/fft_backend/concepts.hpp>
-#include <kmx/fft_backend/capabilities.hpp>
-#include <kmx/fft_backend/software.hpp>
+#include <kmx/fft/backend/concepts.hpp>
+#include <kmx/fft/backend/capabilities.hpp>
+#include <kmx/fft/backend/software.hpp>
 
 // Include statically enabled backends
 #ifdef KMX_FFT_ENABLE_AVX2
-#include <kmx/fft_backend/avx2.hpp>
+#include <kmx/fft/backend/avx2.hpp>
 #endif
 
 #ifdef KMX_FFT_ENABLE_OPENCL
-#include <kmx/fft_backend/opencl.hpp>
+#include <kmx/fft/backend/opencl.hpp>
 #endif
 
 namespace kmx::fft

@@ -895,7 +895,7 @@ namespace kmx::fft
 }
 
 #ifdef KMX_FFT_ENABLE_AVX2
-#include <kmx/fft_backend/avx2.hpp>
+#include <kmx/fft/backend/avx2.hpp>
 
 TEST_CASE("fft_avx2_1d_forward_inverse_identity", "[fft][avx2][d1]")
 {

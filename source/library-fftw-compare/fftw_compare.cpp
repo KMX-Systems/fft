@@ -9,10 +9,8 @@
 #include <cstdio>
 #include <fftw3.h>
 #include <kmx/fft.hpp>
-#include <numbers>
 #include <optional>
 #include <random>
-#include <string>
 #include <string_view>
 #include <vector>
 
@@ -33,12 +31,12 @@ template <typename T>
 using tested_engine = kmx::fft::dynamic_engine<std::complex<T>>;
 #define KMX_FFT_ENGINE_NAME "Dynamic Engine"
 #elif defined(KMX_FFT_ENABLE_AVX2)
-#include <kmx/fft_backend/avx2.hpp>
+#include <kmx/fft/backend/avx2.hpp>
 template <typename T>
 using tested_engine = kmx::fft::engine<std::complex<T>, kmx::fft::backend::avx2<std::complex<T>>>;
 #define KMX_FFT_ENGINE_NAME "AVX2"
 #elif defined(KMX_FFT_ENABLE_OPENCL)
-#include <kmx/fft_backend/opencl.hpp>
+#include <kmx/fft/backend/opencl.hpp>
 template <typename T>
 using tested_engine = kmx::fft::engine<std::complex<T>, kmx::fft::backend::opencl<std::complex<T>>>;
 #define KMX_FFT_ENGINE_NAME "OpenCL"
